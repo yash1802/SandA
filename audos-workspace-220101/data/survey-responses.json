@@ -1,0 +1,10 @@
+{
+  "table": "survey_responses",
+  "description": "Research survey responses for Scout (student) and Alma (university) surveys",
+  "columns": [
+    { "name": "survey_type", "type": "text", "required": true, "description": "student or university" },
+    { "name": "responses_json", "type": "text", "required": true, "description": "JSON object of formatted question answers" },
+    { "name": "contact_email", "type": "text", "required": false, "description": "Email captured from university survey opt-in" },
+    { "name": "source", "type": "text", "required": false, "description": "app or permalink" }
+  ]
+}

@@ -1,0 +1,335 @@
+{
+  "id": "workspace-220101",
+  "name": "Scout & Alma",
+  "description": "Workspace for Scout & Alma",
+  "version": "1.0.0",
+  "templateVersion": 1,
+  "apps": [
+    {
+      "id": "fit-shortlist",
+      "name": "Scout",
+      "icon": "GraduationCap",
+      "dataFile": "data/fit-shortlist.json",
+      "component": "apps/fit-shortlist/App.tsx"
+    },
+    {
+      "id": "prospect-radar",
+      "name": "Alma",
+      "icon": "Radar",
+      "dataFile": "data/prospect-radar.json",
+      "component": "apps/prospect-radar/App.tsx"
+    },
+    {
+      "id": "tasks-db",
+      "name": "Application Checklist",
+      "icon": "List",
+      "component": "apps/TasksDB/App.tsx"
+    },
+    {
+      "id": "student-survey",
+      "name": "Student Survey — University Search",
+      "icon": "ClipboardList",
+      "component": "apps/student-survey/App.tsx",
+      "public": true
+    },
+    {
+      "id": "university-survey",
+      "name": "University Survey — Student Recruitment",
+      "icon": "ClipboardList",
+      "component": "apps/university-survey/App.tsx",
+      "public": true
+    },
+    {
+      "id": "survey-responses",
+      "name": "Research Surveys",
+      "icon": "BarChart",
+      "component": "apps/survey-dashboard/App.tsx"
+    }
+  ],
+  "terminology": {
+    "reading": "loading",
+    "writing": "saving",
+    "creating": "adding",
+    "deleting": "removing",
+    "editing": "updating"
+  },
+  "desktop": {
+    "theme": {
+      "gradient": "from-[#f2fbfd] via-[#e9fcf7] to-[#fff3f4]",
+      "accentColor": "#ff5a5f",
+      "dockStyle": "glass"
+    },
+    "themeRecipe": "glass",
+    "themeTokens": {
+      "palette": {
+        "primary": "#00b8d9",
+        "highlight": "#ff5a5f",
+        "contrast": "#20e3b2",
+        "secondary": "#ff5a5f",
+        "accent": "#20e3b2",
+        "primaryScale": {
+          "50": "#ebf9fc",
+          "100": "#d6f4f9",
+          "200": "#b8ebf4",
+          "500": "#00a9c8",
+          "600": "#00b8d9",
+          "700": "#009bb6",
+          "900": "#00798f"
+        },
+        "highlightScale": {
+          "50": "#fff2f2",
+          "100": "#ffe5e5",
+          "200": "#ffd1d2",
+          "500": "#eb5357",
+          "600": "#ff5a5f",
+          "700": "#d64c50",
+          "900": "#a83b3f"
+        },
+        "surfaces": {
+          "page": "#f2fbfd",
+          "pageAlt": "#e9fcf7",
+          "gradientFrom": "#f2fbfd",
+          "gradientVia": "#e9fcf7",
+          "gradientTo": "#fff3f4",
+          "card": "#ffffff",
+          "cardHover": "#e9fcf7",
+          "panel": "#d7faf1",
+          "panelStrong": "#c9f8ed",
+          "muted": "#fafefe",
+          "accentSoft": "#ffefef",
+          "border": "#c7eff7",
+          "borderStrong": "#a8e7f2"
+        },
+        "text": {
+          "primary": "#00343d",
+          "secondary": "#006375",
+          "brand": "#00343d",
+          "accent": "#47191b",
+          "muted": "#008198",
+          "onPrimary": "#111827",
+          "onHighlight": "#111827",
+          "onContrast": "#111827"
+        },
+        "semantic": {
+          "success": "#16a34a",
+          "warning": "#d97706",
+          "danger": "#dc2626"
+        },
+        "shell": {
+          "buttonText": "#111827",
+          "accentButtonText": "#111827",
+          "dockText": "#111827",
+          "icon": "#47191b",
+          "shadow": "#b3eaf4",
+          "shadowStrong": "#8fe0ee"
+        }
+      },
+      "typography": {
+        "headingFont": "Space Grotesk",
+        "bodyFont": "Space Grotesk",
+        "fontFamily": "\"Space Grotesk\", system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif"
+      },
+      "shell": {
+        "accentColor": "#ff5a5f",
+        "dockStyle": "glass",
+        "pageBackground": "#f2fbfd",
+        "gateBackground": "linear-gradient(135deg, #f2fbfd, #e9fcf7, #fff3f4)",
+        "panelBackground": "#d7faf1",
+        "panelStrongBackground": "#c9f8ed"
+      },
+      "cssVariables": {
+        "--space-border-default": "#c7eff7",
+        "--space-border-strong": "#a8e7f2",
+        "--space-brand-contrast": "#20e3b2",
+        "--space-brand-highlight": "#ff5a5f",
+        "--space-brand-highlight-100": "#ffe5e5",
+        "--space-brand-highlight-200": "#ffd1d2",
+        "--space-brand-highlight-50": "#fff2f2",
+        "--space-brand-highlight-500": "#eb5357",
+        "--space-brand-highlight-600": "#ff5a5f",
+        "--space-brand-highlight-700": "#d64c50",
+        "--space-brand-highlight-900": "#a83b3f",
+        "--space-brand-primary": "#00b8d9",
+        "--space-brand-primary-100": "#d6f4f9",
+        "--space-brand-primary-200": "#b8ebf4",
+        "--space-brand-primary-50": "#ebf9fc",
+        "--space-brand-primary-500": "#00a9c8",
+        "--space-brand-primary-600": "#00b8d9",
+        "--space-brand-primary-700": "#009bb6",
+        "--space-brand-primary-900": "#00798f",
+        "--space-semantic-danger": "#dc2626",
+        "--space-semantic-success": "#16a34a",
+        "--space-semantic-warning": "#d97706",
+        "--space-shell-accent-button-text": "#111827",
+        "--space-shell-button-text": "#111827",
+        "--space-shell-dock-text": "#111827",
+        "--space-shell-icon": "#47191b",
+        "--space-shell-shadow": "#b3eaf4",
+        "--space-shell-shadow-strong": "#8fe0ee",
+        "--space-surface-accent-soft": "#ffefef",
+        "--space-surface-card": "#ffffff",
+        "--space-surface-card-hover": "#e9fcf7",
+        "--space-surface-gradient-from": "#f2fbfd",
+        "--space-surface-gradient-to": "#fff3f4",
+        "--space-surface-gradient-via": "#e9fcf7",
+        "--space-surface-muted": "#fafefe",
+        "--space-surface-page": "#f2fbfd",
+        "--space-surface-page-alt": "#e9fcf7",
+        "--space-surface-panel": "#d7faf1",
+        "--space-surface-panel-strong": "#c9f8ed",
+        "--space-text-accent": "#47191b",
+        "--space-text-brand": "#00343d",
+        "--space-text-muted": "#008198",
+        "--space-text-on-contrast": "#111827",
+        "--space-text-on-highlight": "#111827",
+        "--space-text-on-primary": "#111827",
+        "--space-text-primary": "#00343d",
+        "--space-text-secondary": "#006375"
+      }
+    },
+    "layout": {
+      "agentPosition": "center",
+      "dockPosition": "left",
+      "appWindowSize": "medium"
+    },
+    "branding": {
+      "name": "Scout & Alma",
+      "tagline": "Scout helps students find their fit. Alma helps universities reach matched prospects.",
+      "logoUrl": "",
+      "headingFont": "Space Grotesk",
+      "bodyFont": "Space Grotesk",
+      "colors": {
+        "primary": "#00b8d9",
+        "highlight": "#ff5a5f",
+        "contrast": "#20e3b2",
+        "secondary": "#ff5a5f",
+        "accent": "#20e3b2",
+        "primaryScale": {
+          "50": "#ebf9fc",
+          "100": "#d6f4f9",
+          "200": "#b8ebf4",
+          "500": "#00a9c8",
+          "600": "#00b8d9",
+          "700": "#009bb6",
+          "900": "#00798f"
+        },
+        "highlightScale": {
+          "50": "#fff2f2",
+          "100": "#ffe5e5",
+          "200": "#ffd1d2",
+          "500": "#eb5357",
+          "600": "#ff5a5f",
+          "700": "#d64c50",
+          "900": "#a83b3f"
+        },
+        "surfaces": {
+          "page": "#f2fbfd",
+          "pageAlt": "#e9fcf7",
+          "gradientFrom": "#f2fbfd",
+          "gradientVia": "#e9fcf7",
+          "gradientTo": "#fff3f4",
+          "card": "#ffffff",
+          "cardHover": "#e9fcf7",
+          "panel": "#d7faf1",
+          "panelStrong": "#c9f8ed",
+          "muted": "#fafefe",
+          "accentSoft": "#ffefef",
+          "border": "#c7eff7",
+          "borderStrong": "#a8e7f2"
+        },
+        "text": {
+          "primary": "#00343d",
+          "secondary": "#006375",
+          "brand": "#00343d",
+          "accent": "#47191b",
+          "muted": "#008198",
+          "onPrimary": "#111827",
+          "onHighlight": "#111827",
+          "onContrast": "#111827"
+        },
+        "semantic": {
+          "success": "#16a34a",
+          "warning": "#d97706",
+          "danger": "#dc2626"
+        },
+        "shell": {
+          "buttonText": "#111827",
+          "accentButtonText": "#111827",
+          "dockText": "#111827",
+          "icon": "#47191b",
+          "shadow": "#b3eaf4",
+          "shadowStrong": "#8fe0ee"
+        }
+      },
+      "palette": {
+        "primary": "#00b8d9",
+        "highlight": "#ff5a5f",
+        "contrast": "#20e3b2",
+        "secondary": "#ff5a5f",
+        "accent": "#20e3b2",
+        "primaryScale": {
+          "50": "#ebf9fc",
+          "100": "#d6f4f9",
+          "200": "#b8ebf4",
+          "500": "#00a9c8",
+          "600": "#00b8d9",
+          "700": "#009bb6",
+          "900": "#00798f"
+        },
+        "highlightScale": {
+          "50": "#fff2f2",
+          "100": "#ffe5e5",
+          "200": "#ffd1d2",
+          "500": "#eb5357",
+          "600": "#ff5a5f",
+          "700": "#d64c50",
+          "900": "#a83b3f"
+        },
+        "surfaces": {
+          "page": "#f2fbfd",
+          "pageAlt": "#e9fcf7",
+          "gradientFrom": "#f2fbfd",
+          "gradientVia": "#e9fcf7",
+          "gradientTo": "#fff3f4",
+          "card": "#ffffff",
+          "cardHover": "#e9fcf7",
+          "panel": "#d7faf1",
+          "panelStrong": "#c9f8ed",
+          "muted": "#fafefe",
+          "accentSoft": "#ffefef",
+          "border": "#c7eff7",
+          "borderStrong": "#a8e7f2"
+        },
+        "text": {
+          "primary": "#00343d",
+          "secondary": "#006375",
+          "brand": "#00343d",
+          "accent": "#47191b",
+          "muted": "#008198",
+          "onPrimary": "#111827",
+          "onHighlight": "#111827",
+          "onContrast": "#111827"
+        },
+        "semantic": {
+          "success": "#16a34a",
+          "warning": "#d97706",
+          "danger": "#dc2626"
+        },
+        "shell": {
+          "buttonText": "#111827",
+          "accentButtonText": "#111827",
+          "dockText": "#111827",
+          "icon": "#47191b",
+          "shadow": "#b3eaf4",
+          "shadowStrong": "#8fe0ee"
+        }
+      }
+    }
+  },
+  "cdnDependencies": {
+    "remark-gfm": {
+      "version": "4.0.0"
+    }
+  },
+  "updatedAt": "2026-06-25T23:45:00.000Z"
+}

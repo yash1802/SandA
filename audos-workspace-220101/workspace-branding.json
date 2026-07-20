@@ -1,0 +1,149 @@
+{
+  "businessPlan": "## Business Overview\nScout & Alma\n\n## Customer Profile\nTarget customers identified from business context\n\n### Pain Points\n- Users come to Scout & Alma to make university discovery and recruitment feel less overwhelming and more precise. Prospective students want to find universities that fit their academic goals, career plans, budget, location preferences, and personal priorities, while universities want to connect with students who are genuinely aligned with their programs and community.\n\n## Key Problems\n- **Users come to Scout & Alma to make university discovery**: Users come to Scout & Alma to make university discovery and recruitment feel less overwhelming and more precise. Prospective students want to find universities that fit their academic goals, career plans, budget, location preferences, and personal priorities, while universities want to connect with students who are genuinely aligned with their programs and community.\n\n## Customer Journey\n## 1. USER GOALS\n\nUsers come to Scout & Alma to make university discovery and recruitment feel less overwhelming and more precise. Prospective students want to find universities that fit their academic goals, career plans, budget, location preferences, and personal priorities, while universities want to connect with students who are genuinely aligned with their programs and community.\n\n## 2. QUALIFYING QUESTIONS\n\n**What brings you to Scout & Alma today?**  \n1. I'm a student exploring universities  \n2. I'm a university looking for matched applicants  \n3. I'm a parent, advisor, or counselor helping someone decide  \n\n**Where are you in the process?**  \n1. Just starting and need guidance  \n2. Comparing a shortlist of options  \n3. Ready to connect, apply, or recruit  \n\n## 3. JOURNEY NARRATIVE\n\nThe Scout & Alma journey should feel like a thoughtful conversation, not a search form. The agent begins by understanding who the user is, what they care about, and how far along they are. For students, this means uncovering academic interests, preferred countries or campuses, budget range, career ambitions, lifestyle preferences, and any must-haves like scholarships, internships, student support, or international community. The agent then turns those signals into a personalized list of university matches, explaining why each option fits rather than simply ranking results.\n\nAs students explore, the agent helps them compare programs, ask better questions, prepare for applications, and decide which universities are worth contacting. For universities, the agent learns what kinds of students they want to reach, which programs they want to promote, and what makes their institution distinctive. It then helps surface qualified, interested prospects and suggests more relevant engagement strategies.\n\nWith every interaction, the agent refines its understanding: saved schools, dismissed matches, clicked programs, stated concerns, and successful connections all improve future recommendations.\n\n## 4. APP SUPPORT MAP\n\nCreation tools are most useful when students need help building profiles, personal statements, inquiry messages, or application checklists. Tracking tools should be recommended once users are comparing universities, deadlines, scholarship options, or recruitment leads, while automation tools become valuable when they are ready for reminders, follow-ups, match alerts, and university-student introductions.\n\n## 5. COMMUNITY OPPORTUNITIES\n\nStudents would benefit from seeing anonymized patterns such as \"students with similar goals also explored these universities\" or real experiences from current students and alumni. Scout & Alma could harness shared customer insight through peer reviews, ambassador Q&A, application journey stories, and university response data to help future users make faster, more confident decisions. LinkedIn serves as an additional community channel where users can follow Scout & Alma for updates, share recommendations, and help spread awareness across professional and higher education networks.\n\n## 6. MONETIZATION HOOK\n\nThe first payment moment should happen when a university sees a small batch of highly relevant prospective students whose interests clearly match their programs, making paid access to engagement and recruitment tools feel natural. Revenue is driven by university-side subscriptions and recruitment tools rather than student-facing charges, keeping the student experience free and frictionless.\n\nThe free experience should prove the value by offering profile creation, basic matching, and limited recommendations for students, while universities access a free preview of matched prospects. The paid boundary sits where universities want momentum: full match explanations, unlimited prospect access, priority introductions, advanced analytics, deadline tracking, scholarship insights, and direct messaging. Ongoing subscription value for universities comes from continuous match updates, better recommendations, follow-up support, and measurable progress toward enrollment goals.\n\n## AI Tool Suite\n### Scout\n**Purpose**: Helps prospective students build and manage a personalized list of universities aligned with their academic interests, career aspirations, and personal preferences.\n**User Story**: As a student, I want a focused shortlist of universities that match my goals so I can stop feeling overwhelmed and know where to act next.\n\n### Alma\n**Purpose**: Helps universities view, qualify, and manage prospective students whose interests align with their promoted programs and campus strengths.\n**User Story**: As a university recruiter, I want to see students who genuinely match our programs so I can focus outreach on applicants most likely to engage.\n\n## FAQ Highlights\n- **How should students sign in?** Students are recommended to log in using LinkedIn. It is the fastest way to get started — academic background and career interests pulled from a LinkedIn profile help Scout & Alma surface better-fit university matches from the very first conversation, without students needing to fill out lengthy forms manually.\n- **How can I follow Scout & Alma or recommend it to others?** Users are directed to LinkedIn as the primary channel for following Scout & Alma updates, making community recommendations, and sharing Scout & Alma with students and university teams in their professional network.\n\n---\n*Generated on 6/16/2026*",
+  "workspaceId": "bce7db44-7049-40fa-80a1-1dacb4302c83",
+  "configId": 220101,
+  "componentStyle": {
+    "radiusMd": "rounded-lg"
+  },
+  "name": "Scout & Alma",
+  "tagline": "Where students and universities connect smarter.",
+  "logoUrl": "https://storage.googleapis.com/audos-images/brand-icons/f75e8e30-b468-4caf-940b-fd7d31d27468.png",
+  "iconUrl": "https://storage.googleapis.com/audos-images/brand-icons/f75e8e30-b468-4caf-940b-fd7d31d27468.png",
+  "colors": {
+    "primary": "#31a1b4",
+    "highlight": "#e32626",
+    "contrast": "#07bb8e",
+    "secondary": "#e32626",
+    "accent": "#07bb8e",
+    "primaryScale": {
+      "50": "#eff7f9",
+      "100": "#def0f3",
+      "200": "#c5e5ea",
+      "500": "#2d94a6",
+      "600": "#31a1b4",
+      "700": "#298797",
+      "900": "#206a77"
+    },
+    "highlightScale": {
+      "50": "#fdeeee",
+      "100": "#fbdcdc",
+      "200": "#f7c2c2",
+      "500": "#d12323",
+      "600": "#e32626",
+      "700": "#bf2020",
+      "900": "#961919"
+    },
+    "surfaces": {
+      "page": "#f5fafb",
+      "pageAlt": "#e6f8f4",
+      "gradientFrom": "#f5fafb",
+      "gradientVia": "#e6f8f4",
+      "gradientTo": "#fdf0f0",
+      "card": "#ffffff",
+      "cardHover": "#f7fbfc",
+      "panel": "#ffffff",
+      "panelStrong": "#ffffff",
+      "muted": "#fbfdfe",
+      "accentSoft": "#fce9e9",
+      "border": "#d2eaef",
+      "borderStrong": "#b9dfe6"
+    },
+    "text": {
+      "primary": "#0e2d32",
+      "secondary": "#1a5761",
+      "brand": "#0e2d32",
+      "accent": "#400b0b",
+      "muted": "#22717e",
+      "onPrimary": "#111827",
+      "onHighlight": "#ffffff",
+      "onContrast": "#111827"
+    },
+    "semantic": {
+      "success": "#16a34a",
+      "warning": "#d97706",
+      "danger": "#dc2626"
+    },
+    "shell": {
+      "buttonText": "#111827",
+      "accentButtonText": "#ffffff",
+      "dockText": "#111827",
+      "icon": "#400b0b",
+      "shadow": "#c1e3e9",
+      "shadowStrong": "#a4d6de"
+    }
+  },
+  "palette": {
+    "primary": "#31a1b4",
+    "highlight": "#e32626",
+    "contrast": "#07bb8e",
+    "secondary": "#e32626",
+    "accent": "#07bb8e",
+    "primaryScale": {
+      "50": "#eff7f9",
+      "100": "#def0f3",
+      "200": "#c5e5ea",
+      "500": "#2d94a6",
+      "600": "#31a1b4",
+      "700": "#298797",
+      "900": "#206a77"
+    },
+    "highlightScale": {
+      "50": "#fdeeee",
+      "100": "#fbdcdc",
+      "200": "#f7c2c2",
+      "500": "#d12323",
+      "600": "#e32626",
+      "700": "#bf2020",
+      "900": "#961919"
+    },
+    "surfaces": {
+      "page": "#f5fafb",
+      "pageAlt": "#e6f8f4",
+      "gradientFrom": "#f5fafb",
+      "gradientVia": "#e6f8f4",
+      "gradientTo": "#fdf0f0",
+      "card": "#ffffff",
+      "cardHover": "#f7fbfc",
+      "panel": "#ffffff",
+      "panelStrong": "#ffffff",
+      "muted": "#fbfdfe",
+      "accentSoft": "#fce9e9",
+      "border": "#d2eaef",
+      "borderStrong": "#b9dfe6"
+    },
+    "text": {
+      "primary": "#0e2d32",
+      "secondary": "#1a5761",
+      "brand": "#0e2d32",
+      "accent": "#400b0b",
+      "muted": "#22717e",
+      "onPrimary": "#111827",
+      "onHighlight": "#ffffff",
+      "onContrast": "#111827"
+    },
+    "semantic": {
+      "success": "#16a34a",
+      "warning": "#d97706",
+      "danger": "#dc2626"
+    },
+    "shell": {
+      "buttonText": "#111827",
+      "accentButtonText": "#ffffff",
+      "dockText": "#111827",
+      "icon": "#400b0b",
+      "shadow": "#c1e3e9",
+      "shadowStrong": "#a4d6de"
+    }
+  },
+  "typography": {
+    "font": "Space Grotesk",
+    "category": "sans-serif",
+    "weights": [
+      400,
+      700
+    ],
+    "headingFont": "Space Grotesk",
+    "bodyFont": "Space Grotesk"
+  },
+  "heroVideoUrl": "https://storage.googleapis.com/audos-images/generated-videos/openrouter-OZapXrskGoJz4c9Ns6G0-1781651353255.mp4"
+}
