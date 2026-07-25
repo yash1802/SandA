@@ -331,5 +331,17 @@
       "version": "4.0.0"
     }
   },
-  "updatedAt": "2026-06-25T23:45:00.000Z"
+  "updatedAt": "2026-06-25T23:45:00.000Z",
+  "memberAccess": {
+    "roles": [
+      {
+        "id": "student",
+        "label": "Student"
+      },
+      {
+        "id": "university",
+        "label": "University"
+      }
+    ]
+  }
 }

@@ -13,18 +13,22 @@ import {
   ExternalLink,
   Globe,
   Inbox,
+  Loader2,
   PartyPopper,
   X,
 } from 'lucide-react';
 import { cn, tw, typography } from '../../lib/colors';
-import { useScout } from './scout-store';
+import { researchProgramDetails } from './scout-agent';
+import { fetchProgramDetails, persistProgramDetails, useScout } from './scout-store';
 import {
   FitReason,
   NOT_FOR_ME_OPTIONS,
+  ProgramDetails,
   ProgramRow,
   asArr,
   dayLabel,
   getInitials,
+  relativeStamp,
   tileColor,
 } from './scout-types';
 
@@ -65,6 +69,33 @@ function cleanDisplayFact(value?: string | null): string {
   if (/^3\.0(?:\s+or\s+higher)?\s+recommended$/i.test(text)) return '';
   if (/^(sat\/act|sat or act)\s+optional$/i.test(text)) return '';
   return text;
+}
+
+// Compact verified-fact chips for list rows (only facts that survived the
+// evidence checks are stored, so whatever exists here is safe to show).
+function ProgramFactChips({ program }: { program: ProgramRow }) {
+  const chips = [
+    program.degree_type,
+    cleanDisplayFact(program.duration),
+    cleanDisplayFact(program.tuition),
+    cleanDisplayFact(program.deadline) ? `Apply by ${cleanDisplayFact(program.deadline)}` : '',
+  ]
+    .map((c) => (c || '').trim())
+    .filter(Boolean)
+    .slice(0, 4);
+  if (!chips.length) return null;
+  return (
+    <div className="flex flex-wrap gap-1 mt-1.5">
+      {chips.map((chip, i) => (
+        <span
+          key={i}
+          className={`inline-flex items-center px-2 py-0.5 rounded-md bg-[var(--space-surface-muted)] border border-[var(--space-border-default)] text-[11px] font-medium max-w-[190px] truncate ${typography.color.secondary}`}
+        >
+          {chip}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function LinkText({ text }: { text: string }) {
@@ -173,6 +204,132 @@ export function NotForMeModal({
 }
 
 // ---------------------------------------------------------------------------
+// Verified details — deep-dive researched live from the university's own
+// pages the first time a program is reviewed, then cached permanently.
+
+const detailsCache = new Map<number, ProgramDetails>();
+const detailsInFlight = new Map<number, Promise<ProgramDetails | null>>();
+
+function loadDetails(email: string, program: ProgramRow): Promise<ProgramDetails | null> {
+  const cached = detailsCache.get(program.id);
+  if (cached) return Promise.resolve(cached);
+  const inFlight = detailsInFlight.get(program.id);
+  if (inFlight) return inFlight;
+  const promise = (async () => {
+    const stored = await fetchProgramDetails(email, program.id);
+    if (stored) return stored;
+    const fresh = await researchProgramDetails(program);
+    if (fresh) persistProgramDetails(email, program.id, fresh).catch(() => undefined);
+    return fresh;
+  })()
+    .then((details) => {
+      if (details) detailsCache.set(program.id, details);
+      return details;
+    })
+    .finally(() => detailsInFlight.delete(program.id));
+  detailsInFlight.set(program.id, promise);
+  return promise;
+}
+
+function VerifiedDetails({ program }: { program: ProgramRow }) {
+  const { email } = useScout();
+  const [details, setDetails] = useState<ProgramDetails | null>(() => detailsCache.get(program.id) || null);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const loading = !details && !failed;
+
+  useEffect(() => {
+    let cancelled = false;
+    setDetails(detailsCache.get(program.id) || null);
+    setFailed(false);
+    loadDetails(email, program)
+      .then((d) => {
+        if (cancelled) return;
+        if (d) setDetails(d);
+        else setFailed(true);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [program.id, email, attempt]);
+
+  return (
+    <div className="mt-6">
+      <div className="flex items-baseline justify-between gap-3 pb-2 border-b border-[var(--space-border-default)]">
+        <h3 className={`text-sm font-semibold ${typography.color.primary}`}>Verified details</h3>
+        <span className={`text-[11px] ${typography.color.muted}`}>from the university's website</span>
+      </div>
+      {loading && (
+        <div className={`flex items-center gap-2 mt-3 text-sm ${typography.color.muted}`}>
+          <Loader2 className="w-4 h-4 animate-spin" />
+          <span>Checking {program.university}'s official pages…</span>
+        </div>
+      )}
+      {failed && (
+        <p className={`mt-3 text-sm ${typography.color.muted}`}>
+          Couldn't verify extra details from the university's pages right now.{' '}
+          <button
+            type="button"
+            onClick={() => setAttempt((a) => a + 1)}
+            className="underline hover:text-[var(--space-text-primary)]"
+          >
+            Try again
+          </button>
+        </p>
+      )}
+      {details && (
+        <>
+          {details.sections.map((section) => (
+            <div key={section.title} className="mt-3.5">
+              <p className={`text-[13px] font-semibold ${typography.color.primary}`}>{section.title}</p>
+              <ul className="mt-1.5 pl-5 space-y-1.5" style={{ listStyleType: 'disc', listStylePosition: 'outside' }}>
+                {section.bullets.map((bullet, i) => (
+                  <li key={i} className={`text-sm leading-relaxed ${typography.color.secondary}`} style={{ display: 'list-item' }}>
+                    {bullet.text}
+                    {bullet.source && (
+                      <a
+                        href={bullet.source}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex ml-1.5 align-baseline text-[var(--space-text-muted)] hover:text-[var(--space-text-primary)]"
+                        aria-label="Source page"
+                      >
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          {details.missing && <p className={`mt-3 text-[13px] italic ${typography.color.muted}`}>{details.missing}</p>}
+          <div className="flex flex-wrap items-center gap-1.5 mt-3.5">
+            <span className={`text-[11px] ${typography.color.muted}`}>Sources:</span>
+            {details.sources.slice(0, 4).map((src, i) => (
+              <a
+                key={i}
+                href={src.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[var(--space-surface-muted)] border border-[var(--space-border-default)] text-[11px] max-w-[200px] hover:border-[var(--space-border-strong)] transition-colors ${typography.color.secondary}`}
+              >
+                <Globe className="w-3 h-3 flex-shrink-0" />
+                <span className="truncate">{src.title}</span>
+              </a>
+            ))}
+            <span className={`text-[11px] ${typography.color.muted}`}>· Checked {relativeStamp(details.generatedAt)}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Shared program detail body (used by the carousel and the shortlist modal)
 
 export function ProgramDetailBody({ program }: { program: ProgramRow }) {
@@ -261,6 +418,9 @@ export function ProgramDetailBody({ program }: { program: ProgramRow }) {
           </a>
         )}
       </div>
+
+      {/* Verified deep-dive details */}
+      <VerifiedDetails program={program} />
 
       {/* Fit section */}
       <div className="mt-6">
@@ -576,6 +736,7 @@ export default function ScoutRecommendations() {
                         {p.university}
                         {p.location ? ` · ${p.location}` : ''}
                       </p>
+                      <ProgramFactChips program={p} />
                     </div>
                     <span
                       className={cn(

@@ -128,6 +128,17 @@ export interface ProfileData {
   skillsSummary: string;
   extracurriculars: ExtraItem[];
   misc: MiscItem[];
+  // Raw text of the most recently parsed resume, kept so Scout can always
+  // answer from the resume in chat and re-derive profile sections on demand.
+  resumeText?: string;
+  resumeSourceUrl?: string;
+  resumeParsedAt?: string;
+}
+
+// True when a resume exists but its substance never made it into the profile
+// (e.g. only education was captured) — the signal to re-run resume parsing.
+export function profileMissingResumeSubstance(profile: ProfileData): boolean {
+  return profile.work.length === 0 && profile.skills.length === 0 && profile.extracurriculars.length === 0;
 }
 
 export function emptyProfile(name = ''): ProfileData {
@@ -386,6 +397,27 @@ export function rescueReply(content: string): string | null {
   } catch {
     return m[1];
   }
+}
+
+// ---------------------------------------------------------------------------
+// Verified program deep-dive details (researched from the university's own
+// pages when a student reviews a program; every bullet is evidence-checked)
+
+export interface DetailBullet {
+  text: string;
+  source?: string; // URL of the official page that supports this bullet
+}
+
+export interface DetailSection {
+  title: string;
+  bullets: DetailBullet[];
+}
+
+export interface ProgramDetails {
+  sections: DetailSection[];
+  sources: { title: string; url: string }[];
+  missing?: string; // honest note about what the university's pages don't state
+  generatedAt: string;
 }
 
 // ---------------------------------------------------------------------------

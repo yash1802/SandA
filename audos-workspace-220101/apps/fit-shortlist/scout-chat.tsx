@@ -16,9 +16,9 @@ import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { cn, typography } from '../../lib/colors';
-import { runAgentTurn, parseResumePdf, AgentDeps } from './scout-agent';
+import { runAgentTurn, parseResumePdf, runStartupMaintenance, AgentDeps } from './scout-agent';
 import { useScout, uploadPdf } from './scout-store';
-import { MessageAttachment, MessageRow, asArr, dayLabel, nextIntakeQuestion } from './scout-types';
+import { MessageAttachment, MessageRow, asArr, dayLabel, nextIntakeQuestion, profileMissingResumeSubstance } from './scout-types';
 
 const MAX_FILES = 5;
 
@@ -211,6 +211,8 @@ export default function ScoutChat() {
   const greeted = useRef(false);
   const autoParsedDocs = useRef<Set<string>>(new Set());
   const autoParsing = useRef(false);
+  const maintained = useRef(false);
+  const [maintenanceDone, setMaintenanceDone] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const scrollToBottom = useCallback((smooth = true) => {
@@ -235,20 +237,38 @@ export default function ScoutChat() {
     persistMessage({ role: 'assistant', content: greeting }).catch(() => undefined);
   }, [ready, messages.length, displayName, intake, appendLocalMessage, persistMessage]);
 
+  // One-time startup maintenance: recover chat-stated answers older versions
+  // failed to save, and move recommendations that violate the student's
+  // saved preferences (location/budget/level/deadline) to Skipped.
   useEffect(() => {
-    if (!ready || working || autoParsing.current) return;
-    const hasProfileData =
-      !!profile.name ||
-      !!profile.headline ||
-      !!profile.bio ||
-      profile.education.length > 0 ||
-      profile.work.length > 0 ||
-      profile.skills.length > 0;
-    if (hasProfileData) return;
+    if (!ready || maintained.current) return;
+    maintained.current = true;
+    (async () => {
+      try {
+        const deps: AgentDeps = { ...store, setWorking: () => undefined };
+        await runStartupMaintenance(deps);
+      } catch {
+        // maintenance is best-effort
+      } finally {
+        setMaintenanceDone(true);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+
+  // Auto-(re)parse the resume whenever it hasn't been fully absorbed yet:
+  // a new/unparsed resume URL, or a profile still missing the resume's
+  // substance (work, skills, extracurriculars). Runs once per URL per session,
+  // after startup maintenance so it works from recovered state.
+  useEffect(() => {
+    if (!ready || !maintenanceDone || working || autoParsing.current) return;
     const doc =
+      documents.find((d) => d.url && d.kind === 'resume') ||
       documents.find((d) => d.url && /resume|cv/i.test(d.name)) ||
       documents.find((d) => d.url && d.content_type === 'application/pdf');
     if (!doc?.url || autoParsedDocs.current.has(doc.url)) return;
+    const unparsedUrl = profile.resumeSourceUrl !== doc.url;
+    if (!unparsedUrl && !profileMissingResumeSubstance(profile)) return;
     autoParsedDocs.current.add(doc.url);
 
     autoParsing.current = true;
@@ -269,7 +289,7 @@ export default function ScoutChat() {
         setWorking(null);
       }
     })();
-  }, [ready, working, documents, profile, store, markDocumentAsResume, setActiveTab]);
+  }, [ready, maintenanceDone, working, documents, profile, store, markDocumentAsResume, setActiveTab]);
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;

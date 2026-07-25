@@ -10,6 +10,7 @@ import {
   MessageAttachment,
   MessageRow,
   ProfileData,
+  ProgramDetails,
   ProgramRow,
   ProgramStatus,
   SkipFeedback,
@@ -92,24 +93,48 @@ export async function fileToDataUrl(file: File): Promise<string> {
   return blobToDataUrl(file);
 }
 
-async function documentUrlForAnalysis(documentUrl: string, sourceFile?: File): Promise<string> {
-  if (sourceFile) return fileToDataUrl(sourceFile);
-  if (!/^https?:\/\//i.test(documentUrl) || !/\.pdf(?:$|[?#])/i.test(documentUrl)) return documentUrl;
-  const res = await fetch(documentUrl);
-  if (!res.ok) throw new Error('Could not fetch PDF for analysis');
-  return blobToDataUrl(await res.blob());
+// The analyzer accepts either a fetchable URL or inlined data-URL bytes; each
+// path can fail on its own (URL fetch restrictions vs. request-size limits),
+// so analysis tries every representation we can produce before giving up.
+async function analysisCandidates(documentUrl: string, sourceFile?: File): Promise<string[]> {
+  if (sourceFile) {
+    // Freshly attached file: its bytes are local (the stored URL can lag right
+    // after upload). Keep the stored URL as a server-side fallback.
+    const out = [await fileToDataUrl(sourceFile)];
+    if (/^https?:\/\//i.test(documentUrl)) out.push(documentUrl);
+    return out;
+  }
+  if (/^https?:\/\//i.test(documentUrl) && /\.pdf(?:$|[?#])/i.test(documentUrl)) {
+    const out = [documentUrl];
+    try {
+      const res = await fetch(documentUrl);
+      if (res.ok) out.push(await blobToDataUrl(await res.blob()));
+    } catch {
+      // URL-only it is
+    }
+    return out;
+  }
+  return [documentUrl];
 }
 
 export async function analyzeDocument(documentUrl: string, analysisPrompt: string, sourceFile?: File): Promise<string> {
-  const analyzerUrl = await documentUrlForAnalysis(documentUrl, sourceFile);
-  const res = await fetch('/api/analyze-document', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-App-Id': window.__APP_ID__ || '' },
-    body: JSON.stringify({ documentUrl: analyzerUrl, analysisPrompt, documentType: 'pdf' }),
-  });
-  const data = await res.json().catch(() => null);
-  if (!res.ok || !data?.analysis) throw new Error(data?.error || 'Document analysis failed');
-  return String(data.analysis);
+  const candidates = await analysisCandidates(documentUrl, sourceFile);
+  let lastError: Error | null = null;
+  for (const candidate of candidates) {
+    try {
+      const res = await fetch('/api/analyze-document', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-App-Id': window.__APP_ID__ || '' },
+        body: JSON.stringify({ documentUrl: candidate, analysisPrompt, documentType: 'pdf' }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok && data?.analysis) return String(data.analysis);
+      lastError = new Error(data?.error || 'Document analysis failed');
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error('Document analysis failed');
+    }
+  }
+  throw lastError || new Error('Document analysis failed');
 }
 
 export interface SearchHit {
@@ -194,6 +219,30 @@ export interface NewProgram {
 }
 
 // ---------------------------------------------------------------------------
+// Verified program details — append-only cache (newest row per program wins),
+// so a program is researched once and the result survives across sessions.
+
+export async function fetchProgramDetails(email: string, programId: number): Promise<ProgramDetails | null> {
+  try {
+    const { data } = await db('scout_program_details')
+      .eq('user_email', email)
+      .eq('program_id', programId)
+      .orderBy('id', 'desc')
+      .limit(1)
+      .get();
+    const row = Array.isArray(data) && data.length ? data[0] : null;
+    const details = row ? asObj<ProgramDetails | null>(row.details_json, null) : null;
+    return details && Array.isArray(details.sections) && details.sections.length ? details : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function persistProgramDetails(email: string, programId: number, details: ProgramDetails): Promise<void> {
+  await db('scout_program_details').insert({ user_email: email, program_id: programId, details_json: details });
+}
+
+// ---------------------------------------------------------------------------
 // The store hook — one source of truth for all three columns.
 
 export interface ScoutStore {
@@ -212,6 +261,7 @@ export interface ScoutStore {
   board: Record<BoardStatus, ProgramRow[]>;
   recentPrograms: ProgramRow[];
   setStatus: (id: number, next: ProgramStatus, feedback?: SkipFeedback) => Promise<void>;
+  updateProgram: (id: number, patch: Record<string, any>) => Promise<void>;
   addPrograms: (items: NewProgram[]) => Promise<number>;
   saveIntake: (next: IntakeData) => Promise<void>;
   saveBrief: (next: BriefData) => Promise<void>;
@@ -233,6 +283,11 @@ export interface ScoutStore {
 
 let tempId = -1;
 
+const ts = (v: unknown): number => {
+  const t = new Date(String(v || '')).getTime();
+  return Number.isFinite(t) ? t : 0;
+};
+
 export function useScoutStore(): ScoutStore {
   const identity = useMemo(readSessionIdentity, []);
   // Founder previews may not carry a customer session; fall back to a stable key.
@@ -241,7 +296,6 @@ export function useScoutStore(): ScoutStore {
   const [programs, setPrograms] = useState<ProgramRow[]>([]);
   const [documents, setDocuments] = useState<DocumentRow[]>([]);
   const [messages, setMessages] = useState<MessageRow[]>([]);
-  const [stateRowId, setStateRowId] = useState<number | null>(null);
   const [intake, setIntake] = useState<IntakeData>(emptyIntake());
   const [brief, setBrief] = useState<BriefData>(emptyBrief());
   const [profile, setProfile] = useState<ProfileData>(emptyProfile(identity.name));
@@ -250,67 +304,109 @@ export function useScoutStore(): ScoutStore {
 
   const programsRef = useRef(programs);
   programsRef.current = programs;
-  const stateRowIdRef = useRef<number | null>(null);
-  const ensuringState = useRef(false);
+  // Persistence is append-only: every save INSERTS a full-state snapshot row
+  // and loads read the newest one. In-place row updates are never relied on
+  // for correctness — they proved to silently stop persisting across sessions
+  // (a user's scout_user_state row stopped accepting writes after the session
+  // that created it ended, losing answers/brief/resume), while inserts always
+  // land. `latest` is kept in sync synchronously so each snapshot is complete.
+  const latest = useRef({ intake: emptyIntake(), brief: emptyBrief(), profile: emptyProfile(identity.name) });
+  const snapshotDirty = useRef(false);
   const stateWriteQueue = useRef<Promise<any>>(Promise.resolve());
+  // Rows written at or before the user's latest reset are treated as wiped.
+  const resetCutoffRef = useRef(0);
+
+  const loadResetCutoff = useCallback(async () => {
+    try {
+      const { data } = await db('scout_resets').eq('user_email', email).orderBy('id', 'desc').limit(1).get();
+      const row = Array.isArray(data) && data.length ? data[0] : null;
+      resetCutoffRef.current = row ? ts(row.reset_at) || ts(row.created_at) : 0;
+    } catch {
+      resetCutoffRef.current = 0;
+    }
+  }, [email]);
+
+  const afterReset = useCallback(<T extends { created_at?: string }>(rows: T[]): T[] => {
+    const cutoff = resetCutoffRef.current;
+    if (!cutoff) return rows;
+    return rows.filter((r) => ts(r.created_at) > cutoff);
+  }, []);
 
   const reloadPrograms = useCallback(async () => {
-    const { data } = await db('scout_programs').eq('user_email', email).orderBy('updated_at', 'desc').limit(300).get();
-    setPrograms(Array.isArray(data) ? data : []);
-  }, [email]);
+    const [progRes, eventRes] = await Promise.all([
+      db('scout_programs').eq('user_email', email).orderBy('updated_at', 'desc').limit(300).get(),
+      db('scout_program_events')
+        .eq('user_email', email)
+        .orderBy('id', 'asc')
+        .limit(1000)
+        .get()
+        .catch(() => ({ data: [] })),
+    ]);
+    const rows = afterReset(Array.isArray(progRes.data) ? (progRes.data as ProgramRow[]) : []);
+    // Overlay durable status events (oldest → newest) onto the base rows.
+    const byId = new Map<number, ProgramRow>(rows.map((r) => [r.id, r]));
+    for (const ev of Array.isArray(eventRes.data) ? eventRes.data : []) {
+      const target = byId.get(Number(ev.program_id));
+      const patch = asObj<Record<string, any> | null>(ev.patch_json, null);
+      if (target && patch && typeof patch === 'object') Object.assign(target, patch);
+    }
+    setPrograms(rows);
+  }, [email, afterReset]);
 
   const reloadDocuments = useCallback(async () => {
     const { data } = await db('scout_documents').eq('user_email', email).orderBy('created_at', 'desc').limit(100).get();
-    setDocuments(Array.isArray(data) ? data : []);
-  }, [email]);
+    setDocuments(afterReset(Array.isArray(data) ? data : []));
+  }, [email, afterReset]);
 
   const reloadMessages = useCallback(async () => {
     const { data } = await db('scout_messages').eq('user_email', email).orderBy('created_at', 'desc').limit(200).get();
-    const rows = Array.isArray(data) ? [...data].reverse() : [];
+    const rows = afterReset(Array.isArray(data) ? data : []).reverse();
     setMessages(rows);
-  }, [email]);
+  }, [email, afterReset]);
 
-  const applyStateRow = useCallback(
-    (row: any | null) => {
-      if (!row) return;
-      setStateRowId(row.id);
-      stateRowIdRef.current = row.id;
-      const nextIntake = asObj<IntakeData>(row.intake_json, emptyIntake());
-      if (!nextIntake.answers || typeof nextIntake.answers !== 'object') nextIntake.answers = {};
-      setIntake(nextIntake);
-      setBrief(normalizeBrief(asObj<any>(row.brief_json, null)));
-      const prof = asObj<ProfileData | null>(row.profile_json, null);
-      setProfile(prof && typeof prof === 'object' ? { ...emptyProfile(identity.name), ...prof } : emptyProfile(identity.name));
-    },
-    [identity.name]
-  );
+  const applyState = useCallback((nextIntake: IntakeData, nextBrief: BriefData, nextProfile: ProfileData) => {
+    latest.current = { intake: nextIntake, brief: nextBrief, profile: nextProfile };
+    setIntake(nextIntake);
+    setBrief(nextBrief);
+    setProfile(nextProfile);
+  }, []);
 
   const reloadState = useCallback(async () => {
-    const { data } = await db('scout_user_state').eq('user_email', email).limit(1).get();
-    const row = Array.isArray(data) && data.length ? data[0] : null;
-    if (row) {
-      applyStateRow(row);
-    } else if (!ensuringState.current) {
-      ensuringState.current = true;
-      try {
-        await db('scout_user_state').insert({
-          user_email: email,
-          intake_json: emptyIntake(),
-          brief_json: emptyBrief(),
-          profile_json: emptyProfile(identity.name),
-        });
-        const retry = await db('scout_user_state').eq('user_email', email).limit(1).get();
-        if (Array.isArray(retry.data) && retry.data.length) applyStateRow(retry.data[0]);
-      } catch {
-        // A concurrent tab may have inserted first; re-read below on next reload.
-      }
+    const cutoff = resetCutoffRef.current;
+    let row: any = null;
+    try {
+      const { data } = await db('scout_state_snapshots').eq('user_email', email).orderBy('id', 'desc').limit(1).get();
+      const snap = Array.isArray(data) && data.length ? data[0] : null;
+      if (snap && (!cutoff || ts(snap.created_at) > cutoff)) row = snap;
+    } catch {
+      // fall through to the legacy row
     }
-  }, [email, identity.name, applyStateRow]);
+    if (!row) {
+      // Legacy one-row-per-user store — kept as a read-only migration source
+      // for users whose state predates snapshots. Never written anymore.
+      const { data } = await db('scout_user_state').eq('user_email', email).orderBy('updated_at', 'desc').limit(1).get();
+      const legacy = Array.isArray(data) && data.length ? data[0] : null;
+      if (legacy && (!cutoff || Math.max(ts(legacy.updated_at), ts(legacy.created_at)) > cutoff)) row = legacy;
+    }
+    if (!row) {
+      applyState(emptyIntake(), emptyBrief(), emptyProfile(identity.name));
+      return;
+    }
+    const nextIntake = asObj<IntakeData>(row.intake_json, emptyIntake());
+    if (!nextIntake.answers || typeof nextIntake.answers !== 'object') nextIntake.answers = {};
+    const prof = asObj<ProfileData | null>(row.profile_json, null);
+    applyState(
+      nextIntake,
+      normalizeBrief(asObj<any>(row.brief_json, null)),
+      prof && typeof prof === 'object' ? { ...emptyProfile(identity.name), ...prof } : emptyProfile(identity.name)
+    );
+  }, [email, identity.name, applyState]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
+        await loadResetCutoff();
         await Promise.all([reloadPrograms(), reloadDocuments(), reloadMessages(), reloadState()]);
         if (!cancelled) setLoadError('');
       } catch (err) {
@@ -322,47 +418,60 @@ export function useScoutStore(): ScoutStore {
     return () => {
       cancelled = true;
     };
-  }, [reloadPrograms, reloadDocuments, reloadMessages, reloadState]);
+  }, [loadResetCutoff, reloadPrograms, reloadDocuments, reloadMessages, reloadState]);
 
-  // Serialize scout_user_state writes so rapid successive saves can't interleave.
-  const writeState = useCallback(
-    (patch: Record<string, any>) => {
-      const run = async () => {
-        if (stateRowIdRef.current == null) await reloadState();
-        if (stateRowIdRef.current == null) return;
-        await db('scout_user_state').update(stateRowIdRef.current, patch);
-      };
-      const next = stateWriteQueue.current.then(run, run);
-      stateWriteQueue.current = next;
-      return next;
-    },
-    [reloadState]
-  );
+  // Serialize snapshot writes so rapid successive saves can't interleave; the
+  // dirty flag coalesces back-to-back saves into one insert of the same state.
+  const writeSnapshot = useCallback(() => {
+    snapshotDirty.current = true;
+    const run = async () => {
+      if (!snapshotDirty.current) return;
+      snapshotDirty.current = false;
+      try {
+        await db('scout_state_snapshots').insert({
+          user_email: email,
+          intake_json: latest.current.intake,
+          brief_json: latest.current.brief,
+          profile_json: latest.current.profile,
+          source: 'app',
+        });
+      } catch (err) {
+        snapshotDirty.current = true; // the next save retries this state
+        throw err;
+      }
+    };
+    const next = stateWriteQueue.current.then(run, run);
+    stateWriteQueue.current = next;
+    return next;
+  }, [email]);
 
   const saveIntake = useCallback(
     async (next: IntakeData) => {
       const withCompleted = { ...next, completed: intakeCompleted(next) };
+      latest.current.intake = withCompleted;
       setIntake(withCompleted);
-      await writeState({ intake_json: withCompleted });
+      await writeSnapshot();
     },
-    [writeState]
+    [writeSnapshot]
   );
 
   const saveBrief = useCallback(
     async (next: BriefData) => {
       const stamped = { ...next, updatedAt: new Date().toISOString() };
+      latest.current.brief = stamped;
       setBrief(stamped);
-      await writeState({ brief_json: stamped });
+      await writeSnapshot();
     },
-    [writeState]
+    [writeSnapshot]
   );
 
   const saveProfile = useCallback(
     async (next: ProfileData) => {
+      latest.current.profile = next;
       setProfile(next);
-      await writeState({ profile_json: next });
+      await writeSnapshot();
     },
-    [writeState]
+    [writeSnapshot]
   );
 
   const setStatus = useCallback(
@@ -373,12 +482,33 @@ export function useScoutStore(): ScoutStore {
       // Optimistic: the carousel/board advance immediately; the reload trues things up.
       setPrograms((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
       try {
-        await db('scout_programs').update(id, patch);
+        // The event insert is what makes the change durable; the direct row
+        // update is best-effort so the base table stays readable on its own.
+        await db('scout_program_events').insert({ user_email: email, program_id: id, patch_json: patch });
+        db('scout_programs')
+          .update(id, patch)
+          .catch(() => undefined);
       } finally {
         reloadPrograms().catch(() => undefined);
       }
     },
-    [reloadPrograms]
+    [email, reloadPrograms]
+  );
+
+  const updateProgram = useCallback(
+    async (id: number, patch: Record<string, any>) => {
+      if (!patch || !Object.keys(patch).length) return;
+      setPrograms((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+      try {
+        await db('scout_program_events').insert({ user_email: email, program_id: id, patch_json: patch });
+        db('scout_programs')
+          .update(id, patch)
+          .catch(() => undefined);
+      } finally {
+        reloadPrograms().catch(() => undefined);
+      }
+    },
+    [email, reloadPrograms]
   );
 
   const addPrograms = useCallback(
@@ -527,6 +657,7 @@ export function useScoutStore(): ScoutStore {
     board,
     recentPrograms,
     setStatus,
+    updateProgram,
     addPrograms,
     saveIntake,
     saveBrief,
