@@ -2,7 +2,7 @@
 
 export type ProgramStatus = 'recommended' | 'skipped' | 'saved' | 'safe' | 'target' | 'dream';
 export type BoardStatus = 'saved' | 'safe' | 'target' | 'dream';
-export type TabId = 'recommendations' | 'shortlist' | 'documents' | 'profile';
+export type TabId = 'recommendations' | 'shortlist' | 'documents' | 'profile' | 'invitations';
 
 export const BOARD_STATUSES: BoardStatus[] = ['saved', 'safe', 'target', 'dream'];
 
@@ -54,6 +54,63 @@ export interface DocumentRow {
   uploaded_via?: string | null;
   created_at?: string;
   updated_at?: string;
+}
+
+// Versioning contract for uploads: a new document of the SAME category
+// replaces the previous one (a fresh resume supersedes the old resume), while
+// different categories (resume vs. GMAT report) live side by side. Category
+// is derived from the stored kind plus filename signals; unrecognized files
+// fall back to their normalized filename, so unrelated uploads never collide.
+export function documentCategory(name: string, kind: string): string {
+  if (kind === 'resume') return 'resume';
+  const n = ` ${(name || '').toLowerCase().replace(/[_\-.]+/g, ' ').trim()} `;
+  if (/\b(resume|cv|curriculum vitae)\b/.test(n)) return 'resume';
+  // One score report per test: a GMAT retake replaces the old GMAT file, but
+  // never touches GRE/TOEFL/... files. Docs that can legitimately exist in
+  // multiples (transcripts, SOPs, recommendation letters) are NOT collapsed —
+  // they replace only when the filename is the same document re-uploaded.
+  for (const test of ['gmat', 'gre', 'toefl', 'ielts', 'sat', 'act', 'pte', 'duolingo', 'lsat', 'mcat']) {
+    if (n.includes(` ${test} `)) return `test:${test}`;
+  }
+  if (/\bpassport\b/.test(n)) return 'passport';
+  const base = n.replace(/ (pdf|doc|docx|txt|png|jpg|jpeg)\s*$/i, '').replace(/\s*\(?\d+\)?\s*$/, '').trim();
+  return `file:${base || n.trim()}`;
+}
+
+// Newest-per-category view of the raw rows (rows must arrive newest-first).
+// A kept row claims BOTH its category and its exact filename, so a re-upload
+// of the same file always supersedes even when the two rows carry different
+// kinds (e.g. an old resume-tagged row vs. a fresh plain upload of it).
+export function dedupeDocumentsByCategory(rows: DocumentRow[]): DocumentRow[] {
+  const seen = new Set<string>();
+  const out: DocumentRow[] = [];
+  for (const row of rows) {
+    const name = (row.name || '').trim().toLowerCase();
+    const nameKey = name ? `name:${name}` : '';
+    const catKey = `cat:${documentCategory(row.name, row.kind)}`;
+    if ((nameKey && seen.has(nameKey)) || seen.has(catKey)) continue;
+    if (nameKey) seen.add(nameKey);
+    seen.add(catKey);
+    out.push(row);
+  }
+  return out;
+}
+
+// One "invitation to apply" pushed from a university's Alma account into this
+// student's Scout account (rows live in scout_application_requests).
+export interface InvitationRow {
+  id: number;
+  student_email: string;
+  university_email?: string | null;
+  university_name?: string | null;
+  program_id?: number | null;
+  program_name?: string | null;
+  program_level?: string | null;
+  campus_location?: string | null;
+  message?: string | null;
+  status?: string | null; // sent | read
+  sent_at?: string | null;
+  created_at?: string;
 }
 
 export interface MessageAttachment {
@@ -180,11 +237,48 @@ export const FACTOR_DEFS: { key: FactorKey; label: string }[] = [
   { key: 'postStudyRole', label: 'Post-study job role' },
 ];
 
-export const BUCKET_DEFS: { key: BucketKey; label: string; dotClass: string }[] = [
-  { key: 'excellent', label: 'Excellent fit', dotClass: 'bg-emerald-500' },
-  { key: 'good', label: 'Good fit', dotClass: 'bg-sky-500' },
-  { key: 'borderline', label: 'Borderline', dotClass: 'bg-amber-500' },
-  { key: 'notAFit', label: 'Not a fit', dotClass: 'bg-red-500' },
+// chipClass/addClass power the manually editable brief rows (tinted signal
+// chips and the dashed "+ Add" per bucket, matching Alma's Search-brief UI).
+export const BUCKET_DEFS: {
+  key: BucketKey;
+  label: string;
+  dotClass: string;
+  labelClass: string;
+  chipClass: string;
+  addClass: string;
+}[] = [
+  {
+    key: 'excellent',
+    label: 'Excellent fit',
+    dotClass: 'bg-emerald-500',
+    labelClass: 'text-emerald-700',
+    chipClass: 'bg-emerald-50 border-emerald-100 text-emerald-900',
+    addClass: 'border-emerald-200 bg-emerald-50/40 hover:border-emerald-400 text-emerald-700/70',
+  },
+  {
+    key: 'good',
+    label: 'Good fit',
+    dotClass: 'bg-sky-500',
+    labelClass: 'text-sky-700',
+    chipClass: 'bg-sky-50 border-sky-100 text-sky-900',
+    addClass: 'border-sky-200 bg-sky-50/40 hover:border-sky-400 text-sky-700/70',
+  },
+  {
+    key: 'borderline',
+    label: 'Borderline',
+    dotClass: 'bg-amber-500',
+    labelClass: 'text-amber-700',
+    chipClass: 'bg-amber-50 border-amber-100 text-amber-900',
+    addClass: 'border-amber-200 bg-amber-50/40 hover:border-amber-400 text-amber-700/70',
+  },
+  {
+    key: 'notAFit',
+    label: 'Not a fit',
+    dotClass: 'bg-red-500',
+    labelClass: 'text-red-700',
+    chipClass: 'bg-red-50 border-red-100 text-red-900',
+    addClass: 'border-red-200 bg-red-50/40 hover:border-red-400 text-red-700/70',
+  },
 ];
 
 export function emptyBuckets(): FactorBuckets {
@@ -231,6 +325,91 @@ export function briefIsEmpty(brief: BriefData): boolean {
   );
 }
 
+// Conversational-reference detection: answers like "i already replied above"
+// or "see my earlier message" carry no content of their own and must never be
+// stored as an intake answer or filed into the brief. An answer counts as a
+// non-answer when EVERY word in it is reference/filler vocabulary.
+const REFERENCE_FILLER_TOKENS = new Set([
+  'i', 'ive', 'im', 'we', 'weve', 'you', 'u', 'ur', 'me', 'my', 'mine', 'our', 'your',
+  'have', 'has', 'had', 'did', 'do', 'done', 'can', 'could', 'will', 'would',
+  'already', 'previously', 'earlier', 'before', 'above', 'below', 'prior', 'again',
+  'replied', 'reply', 'answered', 'answer', 'answers', 'responded', 'response',
+  'said', 'told', 'mentioned', 'stated', 'shared', 'gave', 'given', 'wrote', 'written', 'typed',
+  'covered', 'explained', 'provided', 'know', 'knows',
+  'see', 'check', 'refer', 'look', 'read', 'find', 'per',
+  'as', 'like', 'same', 'it', 'this', 'that', 'them', 'there',
+  'the', 'a', 'an', 'to', 'at', 'in', 'on', 'of', 'and', 'so', 'just', 'please', 'pls',
+  'message', 'messages', 'msg', 'chat', 'conversation', 'question', 'questions',
+  'text', 'thread', 'previous', 'last', 'earlier', 'up', 'scroll',
+]);
+
+export function isNonAnswerText(raw: string): boolean {
+  const text = (raw || '').toLowerCase().replace(/[^a-z0-9\s']/g, ' ').replace(/'/g, '').replace(/\s+/g, ' ').trim();
+  if (!text || text.length > 90) return false;
+  const words = text.split(' ');
+  if (/^(same as (above|before|earlier|previously|previous)|as (above|before|earlier)|ditto)$/.test(text)) return true;
+  // Reference phrases pair a "said/replied/see" verb with a backwards pointer
+  // ("above", "already", "earlier", "my previous message"...): require both so
+  // ordinary short answers built from common words never match.
+  const hasVerb = words.some((w) =>
+    ['replied', 'reply', 'answered', 'answer', 'answers', 'responded', 'said', 'told', 'mentioned', 'stated', 'wrote', 'written', 'typed', 'covered', 'explained', 'see', 'check', 'refer', 'look', 'read', 'know', 'knows', 'gave', 'shared', 'provided'].includes(w)
+  );
+  const hasPointer = words.some((w) =>
+    ['above', 'before', 'earlier', 'previously', 'already', 'previous', 'prior', 'last', 'same', 'up'].includes(w)
+  );
+  return hasVerb && hasPointer && words.every((w) => REFERENCE_FILLER_TOKENS.has(w));
+}
+
+// A brief entry must read like a keyword chip (1-5 words), never a sentence.
+// Conservative on purpose: it only rejects clear garbage — reference filler,
+// sentence-length text, fragments that end like prose, or entries that open
+// with conversational lead-ins ("I am open to...", "In addition to...").
+const CHIP_LEADIN_RE = /^(i|i'm|im|i've|ive|we|we're|my|our|you|your|this|that|these|those|there|and|but|or|so|also|additionally|moreover|besides|in addition|as well)\s/i;
+
+export function isKeywordChip(raw: string): boolean {
+  const entry = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!entry || entry.length > 60) return false;
+  const words = entry.split(' ');
+  if (words.length > 5) return false;
+  if (isNonAnswerText(entry)) return false;
+  if (CHIP_LEADIN_RE.test(entry)) return false;
+  // "MS in Management programs as well." — prose fragments end with sentence
+  // punctuation; short abbreviations ("U.S.") stay valid.
+  if (words.length >= 3 && /[.!?]$/.test(entry)) return false;
+  return true;
+}
+
+// Cleans a brief before every save: entries are trimmed and clipped to short
+// keyword length, non-keyword entries (verbatim sentences, conversational
+// filler) are dropped, and each factor is deduped case-insensitively ACROSS
+// its four buckets (the higher-priority bucket keeps the entry), so the same
+// keyword can never appear twice in one section.
+export function sanitizeBrief(brief: BriefData): BriefData {
+  const next = normalizeBrief(JSON.parse(JSON.stringify(brief)));
+  for (const factor of FACTOR_DEFS) {
+    const seen = new Set<string>();
+    for (const bucket of BUCKET_DEFS) {
+      const cleaned: string[] = [];
+      for (const raw of next.factors[factor.key][bucket.key]) {
+        const entry = String(raw).replace(/\s+/g, ' ').trim().slice(0, 80);
+        const key = entry.toLowerCase();
+        if (!entry || seen.has(key) || !isKeywordChip(entry)) continue;
+        seen.add(key);
+        cleaned.push(entry);
+      }
+      next.factors[factor.key][bucket.key] = cleaned;
+    }
+  }
+  if (brief.updatedAt) next.updatedAt = brief.updatedAt;
+  return next;
+}
+
+export function briefHasInvalidEntries(brief: BriefData): boolean {
+  return FACTOR_DEFS.some((f) =>
+    BUCKET_DEFS.some((b) => brief.factors[f.key][b.key].some((entry) => !isKeywordChip(entry)))
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Intake question checklist (state machine persisted in scout_user_state.intake_json)
 
@@ -238,6 +417,10 @@ export interface IntakeData {
   answers: Record<string, string>;
   programLevel?: 'undergraduate' | 'graduate' | '';
   completed?: boolean;
+  // Ids of scout_application_requests rows the student has already seen.
+  // Kept in the durable state snapshot because in-place row updates proved
+  // unreliable across sessions.
+  readInvitationIds?: number[];
 }
 
 export function emptyIntake(): IntakeData {

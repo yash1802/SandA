@@ -287,16 +287,39 @@ export default function SpaceDesktop({
     setUserRole(r);
   };
   // EmailGate writes the role to localStorage just before the session is
-  // established; pick it up once a session exists (this component instance
-  // stays mounted across the gate, so the lazy useState initializer alone
-  // would miss it).
+  // established; mirror it whenever the session changes (this component
+  // instance stays mounted across the gate, so the lazy useState initializer
+  // alone would miss it). localStorage is ALWAYS authoritative: a stale
+  // in-memory role from a previous login in the same tab must never win over
+  // the role the user just picked ("I'm a Student" → Scout, "I'm a
+  // University" → Alma, strictly).
   useEffect(() => {
-    if (userRole) return;
     try {
       const r = localStorage.getItem(roleStorageKey);
-      if (r && VALID_ROLES.includes(r)) setUserRole(r);
+      const stored = r && VALID_ROLES.includes(r) ? r : null;
+      if (stored !== userRole) setUserRole(stored);
     } catch {}
   }, [sessionId, roleStorageKey, userRole]);
+
+  // Logout (session cleared in customer mode) fully resets the shell so the
+  // next login re-routes from the freshly chosen role instead of reusing the
+  // previous login's window/init state.
+  const wasSignedIn = useRef(false);
+  useEffect(() => {
+    if (mode !== 'customer') return;
+    if (sessionId) {
+      wasSignedIn.current = true;
+      return;
+    }
+    if (!wasSignedIn.current) return;
+    wasSignedIn.current = false;
+    hasInitialized.current = false;
+    hasNormalizedPostAuthHistory.current = false;
+    hasTrackedSpaceEntry.current = false;
+    setActiveWindowId(null);
+    setIsAgentMinimized(true);
+    setViewingLanding(false);
+  }, [mode, sessionId]);
 
   // Bypass email gate and role assignment for public survey deep links.
   const publicAppBypass = (() => {

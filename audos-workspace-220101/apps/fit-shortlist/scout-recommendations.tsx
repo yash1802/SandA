@@ -640,7 +640,7 @@ function ProgramCarousel({
 // The sub-section
 
 export default function ScoutRecommendations() {
-  const { recommended, skippedList, programs } = useScout();
+  const { recommended, skippedList, programs, unreadInvitationCount, setActiveTab } = useScout();
   const [view, setView] = useState<ViewKey>('recommendations');
   const [carousel, setCarousel] = useState<{ view: ViewKey; startId: number } | null>(null);
 
@@ -682,6 +682,27 @@ export default function ScoutRecommendations() {
 
       {/* Body */}
       <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+        {/* Unseen university invitations surface on the default view too */}
+        {unreadInvitationCount > 0 && (
+          <button
+            type="button"
+            onClick={() => setActiveTab('invitations')}
+            className="w-full flex items-center gap-3 mb-4 px-4 py-3 rounded-2xl border border-[var(--space-brand-primary-200)] bg-[var(--space-brand-primary-50)] text-left hover:brightness-[0.98] transition-all"
+          >
+            <span className="w-9 h-9 rounded-xl bg-[var(--space-brand-primary)] text-[var(--space-text-on-primary)] flex items-center justify-center flex-shrink-0">
+              <PartyPopper className="w-5 h-5" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className={`block text-sm font-semibold ${typography.color.primary}`}>
+                {unreadInvitationCount === 1
+                  ? 'A university invited you to apply!'
+                  : `${unreadInvitationCount} universities invited you to apply!`}
+              </span>
+              <span className={`block text-xs mt-0.5 ${typography.color.secondary}`}>Open your Invitations to see the details.</span>
+            </span>
+            <ArrowRight className="w-4 h-4 flex-shrink-0 text-[var(--space-text-secondary)]" />
+          </button>
+        )}
         {list.length === 0 ? (
           <div className="flex flex-col items-center justify-center text-center py-20 px-6">
             <Inbox className={cn('w-10 h-10 mb-3', tw.icon.muted)} />

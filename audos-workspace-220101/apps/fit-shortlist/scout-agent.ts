@@ -20,6 +20,7 @@ import {
   FitReason,
   INTAKE_QUESTIONS,
   IntakeData,
+  InvitationRow,
   MessageRow,
   MiscItem,
   ProfileData,
@@ -31,14 +32,18 @@ import {
   SkipFeedback,
   WorkItem,
   asArr,
+  briefHasInvalidEntries,
   emptyProfile,
   extractJson,
   intakeCompleted,
   isBoardStatus,
+  isKeywordChip,
+  isNonAnswerText,
   nextIntakeQuestion,
   normalizeBrief,
   questionApplies,
   rescueReply,
+  sanitizeBrief,
   sniffProgramLevel,
 } from './scout-types';
 import { NewProgram, analyzeDocument, llmChat, webSearch } from './scout-store';
@@ -52,6 +57,7 @@ export interface AgentDeps {
   programs: ProgramRow[];
   documents: DocumentRow[];
   messages: MessageRow[];
+  invitations?: InvitationRow[];
   saveIntake: (next: IntakeData) => Promise<void>;
   saveBrief: (next: BriefData) => Promise<void>;
   saveProfile: (next: ProfileData) => Promise<void>;
@@ -105,6 +111,20 @@ function profileForPrompt(profile: ProfileData): string {
   return JSON.stringify({ ...profile, resumeText: undefined, resumeSourceUrl: undefined, resumeParsedAt: undefined });
 }
 
+function describeInvitations(invitations?: InvitationRow[]): string {
+  const rows = invitations || [];
+  if (!rows.length) return '(none yet — when a university invites the student to apply, it appears in the Invitations tab)';
+  return rows
+    .slice(0, 10)
+    .map(
+      (i) =>
+        `- ${i.university_name || 'A university'} invited them to apply to ${i.program_name || 'a program'}${
+          i.campus_location ? ` (${i.campus_location})` : ''
+        }${i.message ? ` — message: "${s(i.message, 160)}"` : ''}`
+    )
+    .join('\n');
+}
+
 function buildSystemPrompt(deps: AgentDeps): string {
   const { intake, brief, profile, programs, documents, displayName } = deps;
   const resumeSection = profile.resumeText
@@ -117,11 +137,12 @@ You can EXECUTE ACTIONS, not just chat. Respond with ONLY a valid JSON object (n
 
 AVAILABLE ACTIONS:
 1. {"type":"save_intake_answers","answers":{"<questionId>":"<answer in the student's words>"},"programLevel":"undergraduate"|"graduate","profileVisible":true|false}
-   Record answers to intake checklist questions whenever the student answers one OR volunteers the information unprompted. Include only the keys that apply.
+   Record answers to intake checklist questions whenever the student answers one OR volunteers the information unprompted. Include only the keys that apply. If the student points back at something they said earlier ("I already replied above", "see my earlier message"), find that earlier message in this conversation and save ITS substance as the answer — NEVER save the pointing phrase itself.
 2. {"type":"update_profile","profile":{...}}
    Use when the student asks to change their profile or shares new profile-relevant facts (work, research, academics, skills, extracurriculars, location). Start from CURRENT PROFILE below and return the COMPLETE updated object (sections you omit stay untouched). Preserve items you are not changing exactly as they are, including their "aiSummary". Never invent facts.
 3. {"type":"update_brief","factors":{"majors":{"excellent":[],"good":[],"borderline":[],"notAFit":[]},"ranking":{...},"location":{...},"budget":{...},"postStudyRole":{...}}}
    The Search Brief is your internal document of the student's search preferences, bucketed by fit. Include ONLY the factors you want to change — factors you leave out (or leave with all-empty buckets) are preserved as they are. Never return an emptied factor to "clear" it unless the student explicitly asked to remove those preferences.
+   BRIEF ENTRY RULES: every entry is a concise KEYWORD of 1-4 words in Title Case (e.g. "Management", "London", "Under $60k/yr") — NEVER the student's full sentence. Extract the keyword from what they said ("im an indian citizen" → "Indian"). Use ALL FOUR buckets when their words support it: excellent = clearly wanted, good = acceptable alternatives, borderline = hedged/stretch options, notAFit = explicitly ruled out. Never repeat an entry anywhere within the same factor.
 4. {"type":"search_programs","criteria":{"focus":"<what to look for>","university":"<limit to one university>","locations":"<where>","level":"<undergraduate/graduate/degree type>","budget":"<constraint>","count":5}}
    Trigger a live web search for real university programs. Found programs are added to the student's Recommendations automatically. Include only relevant criteria keys; omit "criteria" entirely to search from the student's saved preferences.
 5. {"type":"set_program_status","programId":<id>,"status":"saved"|"safe"|"target"|"dream"|"skipped"}
@@ -150,6 +171,9 @@ ${profileForPrompt(profile)}
 ${resumeSection}
 PROGRAMS (id | university — program | status):
 ${describePrograms(programs)}
+
+INVITATIONS FROM UNIVERSITIES (shown in the student's "Invitations" tab — read-only notifications, NOT a chat; you cannot send or reply to them):
+${describeInvitations(deps.invitations)}
 
 DOCUMENTS: ${documents.length ? documents.map((d) => `${d.name} (${d.kind})`).join(', ') : '(none)'}
 `;
@@ -276,37 +300,131 @@ function locationChips(answer: string): string[] {
   return chips.length ? chips : splitList(answer);
 }
 
-const ANSWER_FACTOR_MAP: { answer: string; factor: FactorKey; single?: boolean; chips?: (v: string) => string[] }[] = [
-  { answer: 'majors', factor: 'majors' },
-  { answer: 'locations', factor: 'location', chips: locationChips },
-  { answer: 'budget', factor: 'budget', single: true },
-  { answer: 'outcomes', factor: 'postStudyRole' },
-  { answer: 'priorities', factor: 'ranking' },
+const ANSWER_FACTOR_MAP: { answer: string; factor: FactorKey; hint: string; single?: boolean; chips?: (v: string) => string[] }[] = [
+  { answer: 'majors', factor: 'majors', hint: 'fields of study, e.g. "Finance", "Computer Science"' },
+  { answer: 'locations', factor: 'location', hint: 'cities, countries, or regions, e.g. "London", "USA"', chips: locationChips },
+  { answer: 'budget', factor: 'budget', hint: 'tuition budget, e.g. "Under $60k/yr"', single: true },
+  { answer: 'outcomes', factor: 'postStudyRole', hint: 'post-study goals, e.g. "Consulting", "Research & Academia"' },
+  { answer: 'priorities', factor: 'ranking', hint: 'program qualities that matter, e.g. "Top-50 Ranking", "Co-op"' },
 ];
 
 function briefChanged(a: BriefData, b: BriefData): boolean {
   return JSON.stringify(a.factors) !== JSON.stringify(b.factors);
 }
 
-// The student's stated answers are authoritative for the "excellent" bucket:
-// replace it when the answer changed this turn, and seed it whenever it is
-// empty while an answer exists (self-heal for briefs that were wiped).
+// LLM distillation: turns the student's raw conversational answers into short
+// keyword chips filed across ALL FOUR fit buckets ("prefer UK but the US works
+// too, definitely not India" → excellent: UK, good: USA, notAFit: India) —
+// never verbatim sentences, never duplicates.
+async function distillBriefFactors(
+  answers: Record<string, string>,
+  targets: { answer: string; factor: FactorKey; hint: string }[]
+): Promise<Partial<Record<FactorKey, Record<string, string[]>>> | null> {
+  const sourceLines = targets
+    .map((t) => `- factor "${t.factor}" (${t.hint}) ← student's answer: "${s(answers[t.answer], 400)}"`)
+    .join('\n');
+  const res = await llmChat(
+    [
+      {
+        role: 'system',
+        content:
+          'You maintain the fit buckets of a student\'s university Search Brief. You convert raw conversational answers into SHORT keyword chips. Return ONLY valid JSON. Never invent preferences the student did not state.',
+      },
+      {
+        role: 'user',
+        content: `Convert each answer below into keyword chips for its factor.
+
+${sourceLines}
+
+Bucket meanings:
+- "excellent": what the student clearly wants (their stated preference)
+- "good": acceptable alternatives they also mentioned ("X would also be fine")
+- "borderline": hedged or stretch options ("maybe", "if I have to", "not sure about")
+- "notAFit": things they explicitly ruled out ("not", "no", "can't afford", "don't want")
+
+Rules:
+- Each chip is a concise keyword or phrase of 1-4 words in Title Case — NEVER a sentence, NEVER filler words ("im interested in management" → "Management").
+- Split multi-item answers into separate chips ("finance, management and economics" → three chips).
+- A budget stays one compact chip (e.g. "Under $60k/yr").
+- Use ONLY what the answer says. Leave buckets empty when nothing was said for them — most answers only fill "excellent".
+- If an answer is only conversational filler or a pointer to an earlier message ("i already replied above", "see my previous answer", "same as before"), it contains NO preference: return all four buckets EMPTY for that factor. Never turn filler into a chip.
+- No duplicate chips within a factor.
+
+Return ONLY JSON:
+{"factors":{"<factorKey>":{"excellent":[],"good":[],"borderline":[],"notAFit":[]}}}
+Include exactly the factors listed above.`,
+      },
+    ],
+    { temperature: 0, maxTokens: 700 }
+  );
+  const parsed = extractJson(res.content);
+  const factors = parsed?.factors;
+  if (!factors || typeof factors !== 'object') return null;
+  const out: Partial<Record<FactorKey, Record<string, string[]>>> = {};
+  for (const t of targets) {
+    const raw = factors[t.factor];
+    if (!raw || typeof raw !== 'object') continue;
+    const buckets: Record<string, string[]> = {};
+    let any = false;
+    for (const bucket of BUCKET_DEFS) {
+      const list = Array.isArray(raw[bucket.key]) ? raw[bucket.key] : [];
+      buckets[bucket.key] = list.map((x: any) => s(x, 80)).filter(Boolean).slice(0, 12);
+      if (buckets[bucket.key].length) any = true;
+    }
+    if (any) out[t.factor] = buckets;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// The student's stated answers are authoritative for their factor: rebuild it
+// when the answer changed this turn, and seed it whenever the factor is empty
+// while an answer exists (self-heal for briefs that were wiped). Distillation
+// extracts keywords across all buckets; the deterministic splitter is only the
+// emergency fallback.
 async function reconcileBriefWithAnswers(deps: AgentDeps, changedKeys: Set<string>): Promise<boolean> {
   const answers = deps.intake.answers || {};
-  const next = normalizeBrief(JSON.parse(JSON.stringify(deps.brief)));
-  for (const map of ANSWER_FACTOR_MAP) {
+  const targets = ANSWER_FACTOR_MAP.filter((map) => {
     const answer = (answers[map.answer] || '').trim();
-    if (!answer) continue;
-    const changedNow = changedKeys.has(map.answer);
-    const empty = next.factors[map.factor].excellent.length === 0;
-    if (!changedNow && !empty) continue;
-    const values = (map.single ? [answer.slice(0, 80)] : (map.chips ? map.chips(answer) : splitList(answer))).slice(0, 8);
-    if (!values.length) continue;
-    next.factors[map.factor].excellent = values;
+    // "i already replied above"-style pointers carry no preference — never
+    // rebuild a factor from them.
+    if (!answer || isNonAnswerText(answer)) return false;
+    const factorEmpty = BUCKET_DEFS.every((b) => deps.brief.factors[map.factor][b.key].length === 0);
+    const factorInvalid = BUCKET_DEFS.some((b) => deps.brief.factors[map.factor][b.key].some((e) => !isKeywordChip(e)));
+    return changedKeys.has(map.answer) || factorEmpty || factorInvalid;
+  });
+  if (!targets.length) return false;
+
+  let distilled: Partial<Record<FactorKey, Record<string, string[]>>> | null = null;
+  try {
+    distilled = await distillBriefFactors(answers, targets);
+  } catch {
+    distilled = null;
   }
-  if (!briefChanged(deps.brief, next)) return false;
-  await deps.saveBrief(next);
-  deps.brief = next;
+
+  const next = normalizeBrief(JSON.parse(JSON.stringify(deps.brief)));
+  for (const map of targets) {
+    const answer = (answers[map.answer] || '').trim();
+    const buckets = distilled?.[map.factor];
+    if (buckets) {
+      next.factors[map.factor] = {
+        excellent: buckets.excellent || [],
+        good: buckets.good || [],
+        borderline: buckets.borderline || [],
+        notAFit: buckets.notAFit || [],
+      };
+      continue;
+    }
+    const values = (map.single ? [answer.slice(0, 80)] : map.chips ? map.chips(answer) : splitList(answer))
+      .map(titleCase)
+      .filter(isKeywordChip)
+      .slice(0, 8);
+    if (!values.length) continue;
+    next.factors[map.factor] = { excellent: values, good: [], borderline: [], notAFit: [] };
+  }
+  const cleaned = sanitizeBrief(next);
+  if (!briefChanged(deps.brief, cleaned)) return false;
+  await deps.saveBrief(cleaned);
+  deps.brief = cleaned;
   return true;
 }
 
@@ -552,6 +670,7 @@ Return ONLY JSON:
 
 Rules:
 - "answers": include a questionId ONLY if this message answers it for the first time OR changes the existing answer. Use the student's own words. Do NOT repeat unchanged current answers. Short confirmations ("yes", "sure", "go ahead") answer whatever the assistant's last message asked or proposed — resolve them into the actual answer.
+- If the message only points at an earlier reply ("I already replied above", "see my previous message", "same as before") WITHOUT restating the information, do NOT include that questionId at all — the pointing phrase is not an answer.
 - "programLevel": fill only when this message makes the level clear (a stated master's/MBA/PhD goal means "graduate").
 - "profileVisible": true/false only when this message answers the profile-visibility question; otherwise null.
 - "wantsSearch": true when the student asks to find / search / recommend / suggest programs or universities now.
@@ -590,6 +709,9 @@ async function applyStateCapture(cap: CapturedState, deps: AgentDeps, turn: Turn
   for (const [key, value] of Object.entries(cap.answers || {})) {
     if (!validIds.has(key) || typeof value !== 'string' || !value.trim()) continue;
     const next = s(value, 500);
+    // Never store conversational pointers ("i already replied above") as an
+    // answer — they'd poison the checklist and the Search Brief downstream.
+    if (isNonAnswerText(next)) continue;
     if ((deps.intake.answers[key] || '').trim().toLowerCase() === next.toLowerCase()) continue;
     captured[key] = next;
   }
@@ -1062,6 +1184,25 @@ export async function runStartupMaintenance(deps: AgentDeps): Promise<string[]> 
   const turn = newTurnFlags();
   // Profile writes at startup belong to the resume pipeline; keep recovery off it.
   turn.lookingForRefreshed = true;
+
+  // Purge stored placeholder answers ("i already replied above") left behind
+  // by older sessions: they are not real answers, block the checklist from
+  // re-asking, and poison the Search Brief when factors reseed from them.
+  try {
+    const answers = deps.intake.answers || {};
+    const junkKeys = Object.keys(answers).filter((k) => isNonAnswerText(answers[k] || ''));
+    if (junkKeys.length) {
+      const nextAnswers = { ...answers };
+      for (const k of junkKeys) delete nextAnswers[k];
+      const nextIntake = { ...deps.intake, answers: nextAnswers };
+      await deps.saveIntake(nextIntake);
+      deps.intake = { ...nextIntake, completed: intakeCompleted(nextIntake) };
+      lines.push('Cleared placeholder answers from your search setup so I can ask again properly');
+    }
+  } catch {
+    // cleanup is best-effort
+  }
+
   try {
     const recovered = await recoverIntakeFromHistory(deps);
     if (recovered) lines.push(...(await applyStateCapture(recovered, deps, turn)));
@@ -1072,6 +1213,24 @@ export async function runStartupMaintenance(deps: AgentDeps): Promise<string[]> 
     lines.push(...(await enforcePreferencesOnPrograms(deps)));
   } catch {
     // enforcement is best-effort
+  }
+
+  // Heal briefs polluted with verbatim sentences or filler chips: rebuild the
+  // affected factors from their stored answers via keyword distillation, then
+  // strip whatever garbage remains.
+  try {
+    if (briefHasInvalidEntries(deps.brief)) {
+      const before = JSON.stringify(deps.brief.factors);
+      await reconcileBriefWithAnswers(deps, new Set());
+      const cleaned = sanitizeBrief(deps.brief);
+      if (briefChanged(deps.brief, cleaned)) {
+        await deps.saveBrief(cleaned);
+        deps.brief = cleaned;
+      }
+      if (JSON.stringify(deps.brief.factors) !== before) lines.push('Rebuilt your Search Brief with clean keywords');
+    }
+  } catch {
+    // healing is best-effort
   }
   return dedupeLines(lines);
 }

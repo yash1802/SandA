@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 
+
 import { AlertCircle, ArrowRight, CheckCircle2, GraduationCap, Menu, Radar, Target, X } from 'lucide-react';
 import { createRoot } from 'react-dom/client';
-
 const Fallback = (props: any) => <section data-stub-component="Fallback">{props.children}</section>;
 
 
@@ -33,21 +33,23 @@ const ProductEntry = (props: any) => <section data-stub-component="ProductEntry"
 
 // === CONFIGURATION ===
 const WORKSPACE_BRAND_NAME = 'Scout & Alma';
+const WORKSPACE_LOGO_URL =
+  'https://storage.googleapis.com/audos-images/brand-logos/770c41cc-8152-454b-a962-31f3575efe68.png';
 const WORKSPACE_TAGLINE =
-  'Where students and universities connect smarter.';
+  'Talk to Scout. Recruit with Alma. Match for life.';
 const WORKSPACE_PRIMARY_COLOR = '#31a1b4';
 const WORKSPACE_HIGHLIGHT_COLOR = '#e32626';
 const WORKSPACE_CONTRAST_COLOR = '#07bb8e';
 const WORKSPACE_FONT_FAMILY =
   '"Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif';
-const WORKSPACE_SURFACE_PAGE = '#f2fbfd';
-const WORKSPACE_BORDER_COLOR = '#c7eff7';
-const WORKSPACE_BORDER_STRONG_COLOR = '#a8e7f2';
-const WORKSPACE_TEXT_PRIMARY = '#00343d';
-const WORKSPACE_TEXT_SECONDARY = '#006375';
-const WORKSPACE_TEXT_MUTED = '#008198';
-const WORKSPACE_TEXT_ON_PRIMARY = '#000000';
-const WORKSPACE_TEXT_ON_HIGHLIGHT = '#000000';
+const WORKSPACE_SURFACE_PAGE = '#f5fafb';
+const WORKSPACE_BORDER_COLOR = '#d2eaef';
+const WORKSPACE_BORDER_STRONG_COLOR = '#b9dfe6';
+const WORKSPACE_TEXT_PRIMARY = '#0e2d32';
+const WORKSPACE_TEXT_SECONDARY = '#1a5761';
+const WORKSPACE_TEXT_MUTED = '#22717e';
+const WORKSPACE_TEXT_ON_PRIMARY = '#111827';
+const WORKSPACE_TEXT_ON_HIGHLIGHT = '#ffffff';
 const WORKSPACE_EDITORIAL_BG = '#F9F9F9';
 const WORKSPACE_SPACE_URL = '/space/workspace-220101';
 
@@ -90,12 +92,11 @@ function Navigation() {
     >
       <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
         <a href="#hero" className="flex items-center gap-2.5">
-          <span
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-base font-bold"
-            style={{ backgroundColor: WORKSPACE_PRIMARY_COLOR, color: WORKSPACE_TEXT_ON_PRIMARY }}
-          >
-            {WORKSPACE_BRAND_NAME.charAt(0)}
-          </span>
+          <img
+            src={WORKSPACE_LOGO_URL}
+            alt={WORKSPACE_BRAND_NAME}
+            className="h-9 w-auto object-contain"
+          />
           <span className="font-semibold text-base" style={{ color: WORKSPACE_TEXT_PRIMARY }}>
             {WORKSPACE_BRAND_NAME}
           </span>
@@ -315,9 +316,9 @@ function FAQSection() {
         <h3 className="text-sm font-semibold uppercase tracking-wide mb-4" style={{ color: WORKSPACE_TEXT_MUTED }}>FAQ: For Students</h3>
         <div className="space-y-4 mb-10">
           {[
-            { q: 'What is Scout?', a: "Scout is a conversational AI — like ChatGPT, but built specifically for university search. You tell Scout your goals, budget, location preferences, program interests, and must-haves. It builds you a personalised shortlist of universities that genuinely fit — including ones you've never heard of that might be the best match for your specific program." },
+            { q: 'What is Scout?', a: "Scout is a conversational AI — like ChatGPT, but built specifically for university search. You tell Scout your goals, budget, location preferences, program interests, and must-haves. It builds you a personalised shortlist of universities that genuinely fit — including ones you’ve never heard of that might be the best match for your specific program." },
             { q: 'Is Scout free?', a: 'Yes — completely free for every student, everywhere, always. No subscriptions, no unlocks, no hidden fees.' },
-            { q: 'How is this different from rankings and university directories?', a: "Rankings tell you who's well-known. Scout tells you who's the best fit for YOU — including universities that are world-class for a specific program but not globally famous. It also surfaces your profile strengths and weaknesses so you know where you stand." },
+            { q: 'How is this different from rankings and university directories?', a: "Rankings tell you who’s well-known. Scout tells you who’s the best fit for YOU — including universities that are world-class for a specific program but not globally famous. It also surfaces your profile strengths and weaknesses so you know where you stand." },
             { q: 'What if I already have universities in mind?', a: "Great — Scout works with your existing list. Mark schools as Dream, Target, or Safe and Scout will help you build around them, filling gaps and flagging better-fit options you might have missed." },
           ].map((item) => (
             <details key={item.q} className="group rounded-xl border p-5" style={{ borderColor: WORKSPACE_BORDER_COLOR }}>
@@ -335,7 +336,7 @@ function FAQSection() {
           {[
             { q: 'What is Alma?', a: 'Alma gives universities access to students who are actively searching right now. Instead of broad recruitment campaigns, you see matched profiles of students whose goals, program interests, budget, and preferences genuinely align with what you offer.' },
             { q: 'How do universities pay?', a: 'Universities pay a monthly or annual subscription for access to matched student profiles. You can start with departmental access (one program or department) or go full-university (all departments, at a discount).' },
-            { q: 'What makes this different from university fairs or social ads?', a: "University fairs are expensive and broad. Social ads can't target students at the moment of decision — students don't publicly signal intent on LinkedIn or Instagram. Every student on Scout is actively deciding right now. That intent signal is something no other channel can replicate." },
+            { q: 'What makes this different from university fairs or social ads?', a: "University fairs are expensive and broad. Social ads can’t target students at the moment of decision — students don’t publicly signal intent on LinkedIn or Instagram. Every student on Scout is actively deciding right now. That intent signal is something no other channel can replicate." },
             { q: 'Is student data handled with consent?', a: 'Yes. Students explicitly opt in for their profiles to be visible to universities. No student data is shared without their permission.' },
           ].map((item) => (
             <details key={item.q} className="group rounded-xl border p-5" style={{ borderColor: WORKSPACE_BORDER_COLOR }}>
@@ -362,12 +363,11 @@ function Footer() {
         <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-8">
           <div>
             <div className="flex items-center gap-2 mb-3">
-              <span
-                className="flex h-7 w-7 items-center justify-center rounded-lg text-sm font-bold"
-                style={{ backgroundColor: WORKSPACE_PRIMARY_COLOR, color: WORKSPACE_TEXT_ON_PRIMARY }}
-              >
-                {WORKSPACE_BRAND_NAME.charAt(0)}
-              </span>
+              <img
+                src={WORKSPACE_LOGO_URL}
+                alt={WORKSPACE_BRAND_NAME}
+                className="h-8 w-auto object-contain"
+              />
               <span className="font-semibold" style={{ color: WORKSPACE_TEXT_PRIMARY }}>{WORKSPACE_BRAND_NAME}</span>
             </div>
             <p className="text-sm max-w-xs" style={{ color: WORKSPACE_TEXT_MUTED }}>{WORKSPACE_TAGLINE}</p>

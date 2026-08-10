@@ -4,19 +4,65 @@
 // factor buckets. Includes the "Add File" manual upload.
 
 import { useRef, useState } from 'react';
-import { ArrowLeft, Calendar, ExternalLink, FileText, Loader2, Search, Upload } from 'lucide-react';
+import { ArrowLeft, Calendar, ExternalLink, FileText, Loader2, Plus, Search, Upload, X } from 'lucide-react';
 import { cn, tw, typography } from '../../lib/colors';
 import { AgentDeps, parseResumePdf } from './scout-agent';
 import { uploadPdf, useScout } from './scout-store';
-import { BUCKET_DEFS, DocumentRow, FACTOR_DEFS, briefIsEmpty, timeAgo } from './scout-types';
+import {
+  BUCKET_DEFS,
+  BucketKey,
+  DocumentRow,
+  FACTOR_DEFS,
+  FactorKey,
+  briefIsEmpty,
+  normalizeBrief,
+  timeAgo,
+} from './scout-types';
 
 type DocView = { kind: 'grid' } | { kind: 'brief' } | { kind: 'pdf'; doc: DocumentRow };
 
 const MAX_FILES = 5;
 
 function BriefView({ onBack }: { onBack: () => void }) {
-  const { brief } = useScout();
+  const { brief, saveBrief } = useScout();
+  const [draft, setDraft] = useState<{ factor: FactorKey; bucket: BucketKey } | null>(null);
+  const [draftText, setDraftText] = useState('');
+  const [saving, setSaving] = useState(false);
   const empty = briefIsEmpty(brief);
+
+  const mutate = async (fn: (next: ReturnType<typeof normalizeBrief>) => void) => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      const next = normalizeBrief(JSON.parse(JSON.stringify(brief)));
+      fn(next);
+      await saveBrief(next);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeEntry = (factor: FactorKey, bucket: BucketKey, index: number) =>
+    mutate((next) => {
+      next.factors[factor][bucket] = next.factors[factor][bucket].filter((_, i) => i !== index);
+    });
+
+  const addEntry = async () => {
+    const target = draft;
+    const value = draftText.trim();
+    if (!target || !value) {
+      setDraft(null);
+      setDraftText('');
+      return;
+    }
+    await mutate((next) => {
+      const bucket = next.factors[target.factor][target.bucket];
+      if (!bucket.some((x) => x.toLowerCase() === value.toLowerCase())) bucket.push(value.slice(0, 80));
+    });
+    setDraft(null);
+    setDraftText('');
+  };
+
   return (
     <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
       <button
@@ -34,52 +80,96 @@ function BriefView({ onBack }: { onBack: () => void }) {
         <div>
           <h2 className={`text-lg font-semibold ${typography.color.primary}`}>Search brief</h2>
           <p className={`text-xs ${typography.color.muted}`}>
-            Scout's internal working document — it evolves as your preferences do.
+            Scout files your preferences into fit buckets — edit any of them directly here, or ask Scout in the chat.
             {brief.updatedAt ? ` Updated ${timeAgo(brief.updatedAt)}.` : ''}
           </p>
         </div>
       </div>
 
-      {empty ? (
+      {empty && (
         <div className={`mt-6 rounded-2xl border border-dashed border-[var(--space-border-strong)] p-6 text-center text-sm ${typography.color.secondary}`}>
-          Nothing here yet. As you answer Scout's questions in the chat, it files your preferences into fit buckets for each search factor.
+          Nothing here yet. As you answer Scout's questions in the chat, it files your preferences into fit buckets for each search factor — or add them manually below.
         </div>
-      ) : (
-        <div className="mt-5 space-y-4">
-          {FACTOR_DEFS.map((factor) => (
-            <div key={factor.key} className="rounded-2xl border border-[var(--space-border-default)] bg-white p-4">
-              <p className={`text-sm font-semibold mb-3 ${typography.color.primary}`}>{factor.label}</p>
-              <div className="space-y-2.5">
-                {BUCKET_DEFS.map((bucket) => {
-                  const entries = brief.factors[factor.key][bucket.key];
-                  return (
-                    <div key={bucket.key} className="flex items-start gap-3">
-                      <div className="flex items-center gap-1.5 w-28 flex-shrink-0 pt-0.5">
-                        <span className={cn('w-2 h-2 rounded-full flex-shrink-0', bucket.dotClass)} />
-                        <span className={`text-xs font-medium ${typography.color.secondary}`}>{bucket.label}</span>
-                      </div>
-                      {entries.length === 0 ? (
-                        <span className={`text-xs pt-0.5 ${typography.color.muted}`}>—</span>
-                      ) : (
+      )}
+
+      <div className="mt-5 space-y-4">
+        {FACTOR_DEFS.map((factor) => (
+          <div key={factor.key} className="rounded-2xl border border-[var(--space-border-default)] bg-white p-4">
+            <p className={`text-sm font-semibold mb-3 ${typography.color.primary}`}>{factor.label}</p>
+            <div className="space-y-2.5">
+              {BUCKET_DEFS.map((bucket) => {
+                const entries = brief.factors[factor.key][bucket.key];
+                const editingHere = draft?.factor === factor.key && draft?.bucket === bucket.key;
+                return (
+                  <div key={bucket.key} className="flex items-start gap-3">
+                    <div className="flex items-center gap-1.5 w-28 flex-shrink-0 pt-2">
+                      <span className={cn('w-2 h-2 rounded-full flex-shrink-0', bucket.dotClass)} />
+                      <span className={cn('text-xs font-medium', bucket.labelClass)}>{bucket.label}</span>
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      {entries.length > 0 && (
                         <div className="flex flex-wrap gap-1.5">
                           {entries.map((entry, i) => (
                             <span
                               key={`${entry}-${i}`}
-                              className="px-2.5 py-1 rounded-full bg-[var(--space-surface-muted)] border border-[var(--space-border-default)] text-xs text-[var(--space-text-primary)]"
+                              className={cn('group inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-full border text-xs', bucket.chipClass)}
                             >
                               {entry}
+                              <button
+                                type="button"
+                                onClick={() => removeEntry(factor.key, bucket.key, i)}
+                                disabled={saving}
+                                className="p-0.5 rounded-full opacity-40 hover:opacity-100 hover:bg-white/70 transition-all"
+                                aria-label={`Remove ${entry}`}
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
                             </span>
                           ))}
                         </div>
                       )}
+                      {editingHere ? (
+                        <input
+                          autoFocus
+                          type="text"
+                          value={draftText}
+                          onChange={(e) => setDraftText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') addEntry();
+                            if (e.key === 'Escape') {
+                              setDraft(null);
+                              setDraftText('');
+                            }
+                          }}
+                          onBlur={addEntry}
+                          placeholder="Type a preference and press Enter"
+                          className="w-full px-3 py-1.5 rounded-lg border border-dashed border-[var(--space-brand-primary)] bg-white text-xs outline-none text-[var(--space-text-primary)]"
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDraft({ factor: factor.key, bucket: bucket.key });
+                            setDraftText('');
+                          }}
+                          disabled={saving}
+                          className={cn(
+                            'inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-dashed text-xs transition-colors',
+                            bucket.addClass
+                          )}
+                        >
+                          <Plus className="w-3 h-3" />
+                          Add
+                        </button>
+                      )}
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+                );
+              })}
             </div>
-          ))}
-        </div>
-      )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

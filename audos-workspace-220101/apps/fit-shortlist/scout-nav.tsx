@@ -7,6 +7,7 @@ import {
   GraduationCap,
   Inbox,
   LogOut,
+  Mail,
   PanelLeft,
   Star,
   User,
@@ -17,6 +18,7 @@ import { TabId, getInitials } from './scout-types';
 
 const NAV_TABS: { id: TabId; label: string; icon: any }[] = [
   { id: 'recommendations', label: 'Recommendations', icon: Inbox },
+  { id: 'invitations', label: 'Invitations', icon: Mail },
   { id: 'shortlist', label: 'Shortlist', icon: Star },
   { id: 'documents', label: 'Documents', icon: FileText },
   { id: 'profile', label: 'Profile', icon: User },
@@ -29,6 +31,7 @@ export default function ScoutNav() {
     navCollapsed,
     setNavCollapsed,
     recommended,
+    unreadInvitationCount,
     recentPrograms,
     openProgramModal,
     displayName,
@@ -88,7 +91,12 @@ export default function ScoutNav() {
         {NAV_TABS.map((tab) => {
           const Icon = tab.icon;
           const active = activeTab === tab.id;
-          const badge = tab.id === 'recommendations' && recommended.length > 0 ? recommended.length : null;
+          const badge =
+            tab.id === 'recommendations' && recommended.length > 0
+              ? recommended.length
+              : tab.id === 'invitations' && unreadInvitationCount > 0
+                ? unreadInvitationCount
+                : null;
           return (
             <button
               key={tab.id}

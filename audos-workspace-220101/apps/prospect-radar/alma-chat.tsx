@@ -1,4 +1,4 @@
-// Scout — middle column: the agentic AI chat interface (Jack-style).
+// Alma — middle column: the agentic AI chat interface (Jill-style).
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -16,9 +16,17 @@ import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { cn, typography } from '../../lib/colors';
-import { runAgentTurn, parseResumePdf, runStartupMaintenance, AgentDeps } from './scout-agent';
-import { useScout, uploadPdf } from './scout-store';
-import { MessageAttachment, MessageRow, asArr, dayLabel, nextIntakeQuestion, profileMissingResumeSubstance } from './scout-types';
+import { AgentDeps, parseBrochurePdf, runAgentTurn, runStartupMaintenance } from './alma-agent';
+import { uploadFile, useAlma } from './alma-store';
+import {
+  MessageAttachment,
+  MessageRow,
+  asArr,
+  dayLabel,
+  isPdfFile,
+  isTextFile,
+  nextIntakeQuestion,
+} from './alma-types';
 
 const MAX_FILES = 5;
 
@@ -175,34 +183,32 @@ function MessageBlock({ message }: { message: MessageRow }) {
 }
 
 const QUICK_PROMPTS = [
-  'Find programs for me',
-  'Update my preferences',
+  'Find candidates for this program',
+  'Update my search preferences',
   'Review my shortlist',
-  'Help with my profile',
+  'Help with the program profile',
 ];
 
-// Session-level guard shared across remounts: one greeting attempt per
-// account, even if the chat component mounts twice in quick succession.
-const greetedAccounts = new Set<string>();
+// Session-level guards shared across remounts: one greeting attempt and one
+// maintenance run per (account, program), even if the chat mounts twice.
+const greetedPrograms = new Set<string>();
+const maintainedPrograms = new Set<string>();
 
-export default function ScoutChat() {
-  const store = useScout();
+export default function AlmaChat() {
+  const store = useAlma();
   const {
-    ready,
-    email,
+    programReady,
+    activeProgram,
     messages,
     displayName,
+    email,
     appendLocalMessage,
     persistMessage,
     hasPersistedMessages,
-    reloadMessages,
-    reloadPrograms,
+    reloadCandidates,
     addDocument,
-    markDocumentAsResume,
     setActiveTab,
     intake,
-    documents,
-    profile,
   } = store;
 
   const [draft, setDraft] = useState('');
@@ -215,11 +221,19 @@ export default function ScoutChat() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const greeted = useRef(false);
-  const autoParsedDocs = useRef<Set<string>>(new Set());
-  const autoParsing = useRef(false);
-  const maintained = useRef(false);
-  const [maintenanceDone, setMaintenanceDone] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const buildDeps = useCallback(
+    (workingSetter: (label: string | null) => void): AgentDeps => ({
+      ...store,
+      program: activeProgram!,
+      setWorking: workingSetter,
+      onCandidatesDiscovered: () => {
+        if (!store.isMobile) setActiveTab('recommendations');
+      },
+    }),
+    [store, activeProgram, setActiveTab]
+  );
 
   const scrollToBottom = useCallback((smooth = true) => {
     requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' }));
@@ -227,7 +241,7 @@ export default function ScoutChat() {
 
   useEffect(() => {
     scrollToBottom(false);
-  }, [ready]);
+  }, [programReady]);
 
   useEffect(() => {
     scrollToBottom();
@@ -235,13 +249,16 @@ export default function ScoutChat() {
 
   // First-run greeting. The in-memory message list can be transiently empty
   // (slow or failed history load), so the greeting only posts after the
-  // DATABASE confirms this account truly has no chat history — otherwise a
-  // duplicate intro would greet the student on every login.
+  // DATABASE confirms this program truly has no chat history — otherwise a
+  // duplicate intro would greet the representative on every login, restarting
+  // onboarding they already finished.
   useEffect(() => {
-    if (!ready || greeted.current || messages.length > 0) return;
-    if (greetedAccounts.has(email)) return;
+    if (!programReady || greeted.current || messages.length > 0 || !activeProgram) return;
+    const guardKey = `${email}:${activeProgram.id}`;
+    if (greetedPrograms.has(guardKey)) return;
     greeted.current = true;
-    greetedAccounts.add(email);
+    greetedPrograms.add(guardKey);
+    const programName = activeProgram.name;
     (async () => {
       const hasHistory = await hasPersistedMessages();
       if (hasHistory !== false) return; // history exists (or unknown) — never re-greet
@@ -249,70 +266,41 @@ export default function ScoutChat() {
       const answered = Object.values(intake.answers || {}).some((v) => (v || '').trim());
       const firstQuestion = nextIntakeQuestion(intake);
       const greeting = answered
-        ? `Welcome back${name}! Your search setup is saved — ask me to find programs, adjust your preferences, or review your shortlist anytime.${
+        ? `Welcome back${name}! Your setup for ${programName} is saved — ask me to find candidates, refine your Search Brief, or update the program profile anytime.${
             firstQuestion ? `\n\nOne thing still open from your setup: ${firstQuestion.text}` : ''
           }`
-        : `Hi${name}, I'm Scout — I help you discover university programs that genuinely fit you, and keep your shortlist organized while you decide.\n\nA few things you can do here: chat with me to search for programs, upload your resume (PDF) and I'll build your profile, or just tell me what you're looking for.\n\nTo get started: ${
-            firstQuestion ? firstQuestion.text : 'tell me a little about what you want to study.'
+        : `Hi${name}, I'm Alma — I help you find candidates who genuinely fit ${programName}, and keep your shortlist organized while you decide who to reach out to.\n\nA few things you can do here: chat with me to search Scout's opted-in students, upload your program brochure (PDF) and I'll build the program profile, or attach a default message (text file) for application requests.\n\nTo get started: ${
+            firstQuestion ? firstQuestion.text : 'tell me a little about your program.'
           }`;
       appendLocalMessage({ role: 'assistant', content: greeting });
       persistMessage({ role: 'assistant', content: greeting }).catch(() => undefined);
     })();
-  }, [ready, messages.length, email, displayName, intake, hasPersistedMessages, appendLocalMessage, persistMessage]);
+  }, [programReady, messages.length, email, displayName, intake, activeProgram, hasPersistedMessages, appendLocalMessage, persistMessage]);
 
-  // One-time startup maintenance: recover chat-stated answers older versions
-  // failed to save, and move recommendations that violate the student's
-  // saved preferences (location/budget/level/deadline) to Skipped.
+  // One-time startup maintenance per (account, program) and session: recover
+  // chat-stated answers, parse a brochure that never fed the profile (e.g. the
+  // one submitted at program creation), and run the first candidate discovery.
+  // The guard lives at module level so a remount can't double-run it.
   useEffect(() => {
-    if (!ready || maintained.current) return;
-    maintained.current = true;
+    if (!programReady || !activeProgram) return;
+    const guardKey = `${email}:${activeProgram.id}`;
+    if (maintainedPrograms.has(guardKey)) return;
+    maintainedPrograms.add(guardKey);
     (async () => {
       try {
-        const deps: AgentDeps = { ...store, setWorking: () => undefined };
-        await runStartupMaintenance(deps);
+        const lines = await runStartupMaintenance(buildDeps(() => undefined));
+        if (lines.length) {
+          appendLocalMessage({ role: 'assistant', content: 'While you were away I tidied things up.', actions: lines });
+          persistMessage({ role: 'assistant', content: 'While you were away I tidied things up.', actions: lines }).catch(() => undefined);
+        }
       } catch {
         // maintenance is best-effort
       } finally {
-        setMaintenanceDone(true);
+        reloadCandidates().catch(() => undefined);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready]);
-
-  // Auto-(re)parse the resume whenever it hasn't been fully absorbed yet:
-  // a new/unparsed resume URL, or a profile still missing the resume's
-  // substance (work, skills, extracurriculars). Runs once per URL per session,
-  // after startup maintenance so it works from recovered state.
-  useEffect(() => {
-    if (!ready || !maintenanceDone || working || autoParsing.current) return;
-    const doc =
-      documents.find((d) => d.url && d.kind === 'resume') ||
-      documents.find((d) => d.url && /resume|cv/i.test(d.name)) ||
-      documents.find((d) => d.url && d.content_type === 'application/pdf');
-    if (!doc?.url || autoParsedDocs.current.has(doc.url)) return;
-    const unparsedUrl = profile.resumeSourceUrl !== doc.url;
-    if (!unparsedUrl && !profileMissingResumeSubstance(profile)) return;
-    autoParsedDocs.current.add(doc.url);
-
-    autoParsing.current = true;
-    (async () => {
-      setWorking(`Reading ${doc.name}…`);
-      try {
-        const deps: AgentDeps = {
-          ...store,
-          setWorking,
-          onProgramsDiscovered: () => {
-            if (!store.isMobile) setActiveTab('recommendations');
-          },
-        };
-        const line = await parseResumePdf(doc.url || '', doc.name, deps).catch(() => null);
-        if (line) await markDocumentAsResume(doc.url || '').catch(() => undefined);
-      } finally {
-        autoParsing.current = false;
-        setWorking(null);
-      }
-    })();
-  }, [ready, maintenanceDone, working, documents, profile, store, markDocumentAsResume, setActiveTab]);
+  }, [programReady, activeProgram?.id]);
 
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -323,12 +311,12 @@ export default function ScoutChat() {
   const addFiles = (list: FileList | null) => {
     if (!list) return;
     const incoming = Array.from(list);
-    const pdfs = incoming.filter((f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
+    const accepted = incoming.filter((f) => isPdfFile(f.type || f.name) || isTextFile(f.type || f.name));
     let note = '';
-    if (pdfs.length < incoming.length) note = 'Only PDF files can be attached.';
+    if (accepted.length < incoming.length) note = 'Only PDF and text files can be attached.';
     setFiles((prev) => {
       const merged = [...prev];
-      for (const f of pdfs) {
+      for (const f of accepted) {
         if (merged.length >= MAX_FILES) {
           note = `You can attach up to ${MAX_FILES} files per message.`;
           break;
@@ -342,7 +330,7 @@ export default function ScoutChat() {
   };
 
   const send = async (textOverride?: string) => {
-    if (working) return;
+    if (working || !activeProgram) return;
     const text = (textOverride ?? draft).trim();
     const pending = files;
     if (!text && !pending.length) return;
@@ -361,18 +349,25 @@ export default function ScoutChat() {
       for (const file of pending) {
         setWorking(`Uploading ${file.name}…`);
         try {
-          const up = await uploadPdf(file);
+          const textual = isTextFile(file.type || file.name);
+          const textContent = textual ? (await file.text()).slice(0, 8000) : '';
+          const up = await uploadFile(file);
           attachments.push({ name: file.name, url: up.url });
-          sourceFiles.set(up.url, file);
+          if (!textual) sourceFiles.set(up.url, file);
           await addDocument({
             name: file.name,
-            kind: 'upload',
+            kind: textual ? (/message/i.test(file.name) ? 'default_message' : 'upload') : 'upload',
             url: up.url,
             content_type: up.contentType,
             size_bytes: up.bytes,
             uploaded_via: 'chat',
+            text_content: textContent,
           });
-          preLines.push(`Added ${file.name} to Documents`);
+          preLines.push(
+            textual && /message/i.test(file.name)
+              ? `Added ${file.name} to Documents as your default application-request message`
+              : `Added ${file.name} to Documents`
+          );
         } catch {
           preLines.push(`Couldn't upload ${file.name} — please try again`);
         }
@@ -384,33 +379,33 @@ export default function ScoutChat() {
       appendLocalMessage({ role: 'user', content: userContent, attachments });
       const userPersist = persistMessage({ role: 'user', content: userContent, attachments }).catch(() => undefined);
 
-      // 3) Parse any attached PDFs that turn out to be resumes → Profile pipeline.
-      const deps: AgentDeps = {
-        ...store,
-        setWorking,
-        // Surface fresh recommendations in the right panel — but never yank a
-        // mobile user out of the chat mid-conversation.
-        onProgramsDiscovered: () => {
-          if (!store.isMobile) setActiveTab('recommendations');
-        },
-      };
+      // 3) Any attached PDF that turns out to be a program brochure feeds the
+      // Profile pipeline (PRD: the pipeline runs for every upload path).
+      const deps = buildDeps(setWorking);
       const parsedNotes: string[] = [];
-      for (const att of attachments) {
-        setWorking(`Reading ${att.name}…`);
-        const line = await parseResumePdf(att.url, att.name, deps, sourceFiles.get(att.url)).catch(() => null);
+      for (const [url, file] of sourceFiles) {
+        const line = await parseBrochurePdf(url, file.name, deps, file).catch(() => null);
         if (line) {
           preLines.push(line);
-          parsedNotes.push(`${att.name} was parsed as a resume and the student's profile has been updated with it.`);
-          markDocumentAsResume(att.url).catch(() => undefined);
-        } else if (/resume|cv/i.test(att.name)) {
-          preLines.push(`Saved ${att.name}, but couldn't extract profile details from it`);
+          parsedNotes.push(`${file.name} was parsed as a program brochure and the program Profile has been updated with it.`);
+          // Replace the plain upload row with a brochure-tagged one.
+          await addDocument({
+            name: file.name,
+            kind: 'brochure',
+            url,
+            content_type: 'application/pdf',
+            size_bytes: file.size,
+            uploaded_via: 'chat',
+          }).catch(() => undefined);
+        } else if (/brochure|prospectus/i.test(file.name)) {
+          preLines.push(`Saved ${file.name}, but couldn't extract program details from it`);
         }
       }
 
       // 4) The agentic turn.
       setWorking('Thinking…');
       const attachmentNote = attachments.length
-        ? `The student attached ${attachments.map((a) => a.name).join(', ')} (saved to their Documents). ${parsedNotes.join(' ')}`
+        ? `The representative attached ${attachments.map((a) => a.name).join(', ')} (saved to Documents). ${parsedNotes.join(' ')}`
         : '';
       const result = await runAgentTurn(userContent, attachmentNote, deps);
 
@@ -420,11 +415,11 @@ export default function ScoutChat() {
       await persistMessage({ role: 'assistant', content: result.reply, actions: actionLines }).catch(() => undefined);
     } finally {
       setWorking(null);
-      reloadPrograms().catch(() => undefined);
+      reloadCandidates().catch(() => undefined);
     }
   };
 
-  // Group messages by calendar day for Jack-style separators.
+  // Group messages by calendar day for Jill-style separators.
   const grouped = useMemo(() => {
     const groups: { label: string; items: MessageRow[] }[] = [];
     for (const m of messages) {
@@ -445,6 +440,15 @@ export default function ScoutChat() {
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-[var(--space-surface-page)]/60 relative">
+      {/* Header — program name + status chip (Jill's "Founding Designer · Hiring") */}
+      <div className="flex-shrink-0 h-12 flex items-center gap-2.5 px-4 sm:px-6 border-b border-[var(--space-border-default)]">
+        <h1 className={`text-[15px] font-semibold truncate ${typography.color.primary}`}>{activeProgram?.name || 'Program'}</h1>
+        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-[var(--space-surface-muted)] border border-[var(--space-border-default)] text-xs font-medium text-[var(--space-text-secondary)] flex-shrink-0">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+          Recruiting
+        </span>
+      </div>
+
       {/* Messages */}
       <div ref={scrollRef} onScroll={onScroll} className="flex-1 min-h-0 overflow-y-auto px-4 sm:px-8 pt-4 pb-2">
         <div className="max-w-[720px] mx-auto">
@@ -533,7 +537,7 @@ export default function ScoutChat() {
             <input
               ref={fileInputRef}
               type="file"
-              accept="application/pdf,.pdf"
+              accept="application/pdf,.pdf,text/plain,.txt,.md"
               multiple
               className="hidden"
               onChange={(e) => addFiles(e.target.files)}
@@ -546,8 +550,8 @@ export default function ScoutChat() {
                 'w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 border border-[var(--space-border-default)] text-[var(--space-text-secondary)] hover:bg-[var(--space-surface-muted)] transition-colors',
                 (working || files.length >= MAX_FILES) && 'opacity-50 cursor-not-allowed'
               )}
-              aria-label="Attach PDF files"
-              title={`Attach PDFs (up to ${MAX_FILES})`}
+              aria-label="Attach PDF or text files"
+              title={`Attach PDFs or text files (up to ${MAX_FILES})`}
             >
               <Plus className="w-[18px] h-[18px]" />
             </button>
@@ -565,7 +569,7 @@ export default function ScoutChat() {
                   send();
                 }
               }}
-              placeholder="Ask Scout anything…"
+              placeholder="Ask Alma anything…"
               className="flex-1 resize-none bg-transparent outline-none text-[15px] leading-6 py-1.5 max-h-[140px] text-[var(--space-text-primary)] placeholder:text-[var(--space-text-muted)]"
             />
             <button
