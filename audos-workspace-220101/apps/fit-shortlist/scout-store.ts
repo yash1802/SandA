@@ -24,13 +24,22 @@ import {
   intakeCompleted,
   isBoardStatus,
   normalizeBrief,
+  normalizeIntakeEligibility,
+  nextIntakeQuestion,
+  profileFactsKey,
+  profileHasBioFacts,
   sanitizeBrief,
+  toTitleCaseName,
 } from './scout-types';
 
 // All reads/writes bypass session scoping and key on user_email instead, so the
 // student's data survives logout/login (session ids change; the email does not).
 export function db(table: string) {
   return (window as any).__workspaceDb.from(table, { shared: true });
+}
+
+function analyticsDb(table: string) {
+  return (window as any).__workspaceDb.from(table);
 }
 
 export interface SessionIdentity {
@@ -147,40 +156,184 @@ export interface SearchHit {
 }
 
 export async function webSearch(query: string, num = 8): Promise<SearchHit[]> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 30_000);
+  let res: Response;
   try {
-    const res = await fetch('/api/search', {
+    res = await fetch('/api/search', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
       body: JSON.stringify({ query, searchType: 'web', num, language: 'en' }),
     });
-    const data = await res.json();
-    return Array.isArray(data?.results) ? data.results : [];
-  } catch {
-    return [];
+  } catch (error) {
+    const timedOut =
+      !!error &&
+      typeof error === 'object' &&
+      'name' in error &&
+      (error as { name?: unknown }).name === 'AbortError';
+    throw new AgentApiError(
+      timedOut ? 'timeout' : 'network',
+      timedOut ? 'The search request timed out.' : 'The search service could not be reached.'
+    );
+  } finally {
+    window.clearTimeout(timeoutId);
   }
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok) throw new AgentApiError('http', `Search request failed (${res.status})`, res.status);
+  return Array.isArray(data?.results) ? data.results : [];
 }
 
 export interface LlmResult {
   content: string;
 }
 
+export type AgentApiErrorKind = 'network' | 'timeout' | 'http';
+
+export class AgentApiError extends Error {
+  readonly name = 'AgentApiError';
+
+  constructor(
+    readonly kind: AgentApiErrorKind,
+    message: string,
+    readonly status?: number
+  ) {
+    super(message);
+  }
+}
+
+export function isAgentApiError(error: unknown): error is AgentApiError {
+  return error instanceof AgentApiError;
+}
+
 export async function llmChat(
   messages: { role: string; content: string }[],
-  opts: { temperature?: number; maxTokens?: number; model?: string } = {}
+  opts: {
+    temperature?: number;
+    maxTokens?: number;
+    model?: string;
+    onDelta?: (chunk: string, accumulated: string) => void;
+  } = {}
 ): Promise<LlmResult> {
-  const res = await fetch('/proxy/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: opts.model || 'gpt-4o-mini',
-      temperature: opts.temperature ?? 0.4,
-      max_tokens: opts.maxTokens ?? 1400,
-      messages,
-    }),
-  });
-  if (!res.ok) throw new Error(`AI request failed (${res.status})`);
-  const data = await res.json();
-  return { content: String(data?.choices?.[0]?.message?.content || '') };
+  const system = messages
+    .filter((message) => message.role === 'system')
+    .map((message) => message.content)
+    .filter(Boolean)
+    .join('\n\n');
+  const conversation: { role: 'user' | 'assistant'; content: string }[] = [];
+  for (const message of messages) {
+    if (message.role !== 'user' && message.role !== 'assistant') continue;
+    const content = String(message.content || '').trim();
+    if (!content) continue;
+    const role = message.role as 'user' | 'assistant';
+    const previous = conversation[conversation.length - 1];
+    if (previous?.role === role) previous.content += `\n\n${content}`;
+    else conversation.push({ role, content });
+  }
+  // Anthropic conversations begin with a user turn. Preserve a leading
+  // assistant greeting as context without dropping it.
+  if (conversation[0]?.role === 'assistant') {
+    conversation.unshift({ role: 'user', content: 'Conversation context follows.' });
+  }
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 45_000);
+  let res: Response;
+  try {
+    res = await fetch('/proxy/anthropic/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Workspace-DB-Token': (window as any).__workspaceDb?.token || '',
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model: opts.model || 'claude-sonnet-5',
+        max_tokens: opts.maxTokens ?? 1400,
+        thinking: { type: 'disabled' },
+        ...(system ? { system } : {}),
+        messages: conversation,
+        stream: !!opts.onDelta,
+      }),
+    });
+  } catch (error) {
+    window.clearTimeout(timeoutId);
+    const timedOut =
+      !!error &&
+      typeof error === 'object' &&
+      'name' in error &&
+      (error as { name?: unknown }).name === 'AbortError';
+    throw new AgentApiError(
+      timedOut ? 'timeout' : 'network',
+      timedOut ? 'The AI request timed out.' : 'The AI service could not be reached.'
+    );
+  }
+
+  try {
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new AgentApiError('http', data?.error?.message || `AI request failed (${res.status})`, res.status);
+    }
+
+    if (!opts.onDelta) {
+      const data = await res.json().catch(() => null);
+      if (data?.error) throw new AgentApiError('http', data.error.message || 'AI request failed', res.status);
+      return {
+        content: (Array.isArray(data?.content) ? data.content : [])
+          .filter((block: any) => block?.type === 'text')
+          .map((block: any) => String(block.text || ''))
+          .join(''),
+      };
+    }
+
+    if (!res.body) throw new AgentApiError('network', 'The AI streaming response had no body.');
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let content = '';
+    let completed = false;
+
+    const consumeLine = (line: string) => {
+      if (!line.startsWith('data:')) return;
+      const raw = line.slice(5).trim();
+      if (!raw) return;
+      let event: any;
+      try {
+        event = JSON.parse(raw);
+      } catch {
+        throw new AgentApiError('network', 'The AI stream returned an invalid event.');
+      }
+      if (event?.type === 'error') {
+        throw new AgentApiError('http', event.error?.message || 'AI streaming failed.');
+      }
+      if (event?.type === 'message_stop') {
+        completed = true;
+        return;
+      }
+      if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+        const chunk = String(event.delta.text || '');
+        if (!chunk) return;
+        content += chunk;
+        opts.onDelta?.(chunk, content);
+      }
+    };
+
+    while (!completed) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) consumeLine(line);
+    }
+    buffer += decoder.decode();
+    for (const line of buffer.split('\n')) consumeLine(line);
+    if (!completed) throw new AgentApiError('network', 'The AI stream ended before completion.');
+    return { content };
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +363,13 @@ export interface NewProgram {
   university: string;
   program_name: string;
   degree_type?: string;
+  program_type?: 'undergrad' | 'masters' | 'apprenticeship';
+  country_code?: string;
+  country_name?: string;
+  company_name?: string;
+  eligibility_notes?: string;
+  active_status?: 'active' | 'uncertain' | 'inactive';
+  last_seen_active?: string;
   location?: string;
   tuition?: string;
   deadline?: string;
@@ -248,6 +408,24 @@ export async function persistProgramDetails(email: string, programId: number, de
 // ---------------------------------------------------------------------------
 // The store hook — one source of truth for all three columns.
 
+export interface ScoutStatePatch {
+  intake?: IntakeData;
+  brief?: BriefData;
+  profile?: ProfileData;
+}
+
+export interface ProfileSaveOptions {
+  bioAlreadyGenerated?: boolean;
+  expectedFactsKey?: string;
+}
+
+export interface ProfileSaveReceipt {
+  revision: string;
+  profile: ProfileData;
+}
+
+export type ProfileSummarySection = 'education' | 'work' | 'research' | 'extracurriculars' | 'skills';
+
 export interface ScoutStore {
   email: string;
   displayName: string;
@@ -270,10 +448,19 @@ export interface ScoutStore {
   setStatus: (id: number, next: ProgramStatus, feedback?: SkipFeedback) => Promise<void>;
   updateProgram: (id: number, patch: Record<string, any>) => Promise<void>;
   addPrograms: (items: NewProgram[]) => Promise<number>;
+  saveState: (next: ScoutStatePatch) => Promise<void>;
   saveIntake: (next: IntakeData) => Promise<void>;
   saveBrief: (next: BriefData) => Promise<void>;
   hasPersistedMessages: () => Promise<boolean | null>;
-  saveProfile: (next: ProfileData) => Promise<void>;
+  saveProfile: (next: ProfileData, options?: ProfileSaveOptions) => Promise<ProfileSaveReceipt>;
+  commitGeneratedBio: (revision: string, bio: string) => Promise<boolean>;
+  failGeneratedBio: (revision: string, errorCode: string) => Promise<boolean>;
+  commitProfileItemSummary: (
+    revision: string,
+    section: ProfileSummarySection,
+    index: number | null,
+    summary: string
+  ) => Promise<boolean>;
   addDocument: (doc: {
     name: string;
     kind: 'resume' | 'upload';
@@ -320,6 +507,7 @@ export function useScoutStore(): ScoutStore {
   // that created it ended, losing answers/brief/resume), while inserts always
   // land. `latest` is kept in sync synchronously so each snapshot is complete.
   const latest = useRef({ intake: emptyIntake(), brief: emptyBrief(), profile: emptyProfile(identity.name) });
+  const profileRevisionRef = useRef(crypto.randomUUID());
   const snapshotDirty = useRef(false);
   const stateWriteQueue = useRef<Promise<any>>(Promise.resolve());
   // Snapshot inserts are forbidden until the canonical DB state has actually
@@ -327,57 +515,96 @@ export function useScoutStore(): ScoutStore {
   // state would become the newest snapshot and wipe the account (append-only
   // model — newest row wins).
   const stateLoadedRef = useRef(false);
+  // Program status events are immutable between writes. Cache the initial read
+  // so chat renders and message sends can refresh programs without repeatedly
+  // downloading the same event history.
+  const programEventsRef = useRef<any[] | null>(null);
+  const programEventsRequestRef = useRef<Promise<any[]> | null>(null);
   // Rows written at or before the user's latest reset are treated as wiped.
   const resetCutoffRef = useRef(0);
 
-  const loadResetCutoff = useCallback(async () => {
+  const loadResetCutoff = useCallback(async (): Promise<number> => {
+    let cutoff = 0;
     try {
       const { data } = await db('scout_resets').eq('user_email', email).orderBy('id', 'desc').limit(1).get();
       const row = Array.isArray(data) && data.length ? data[0] : null;
-      resetCutoffRef.current = row ? ts(row.reset_at) || ts(row.created_at) : 0;
+      cutoff = row ? ts(row.reset_at) || ts(row.created_at) : 0;
     } catch {
-      resetCutoffRef.current = 0;
+      cutoff = 0;
     }
+    resetCutoffRef.current = cutoff;
+    return cutoff;
   }, [email]);
 
-  const afterReset = useCallback(<T extends { created_at?: string }>(rows: T[]): T[] => {
-    const cutoff = resetCutoffRef.current;
+  const afterReset = useCallback(<T extends { created_at?: string }>(rows: T[], cutoff = resetCutoffRef.current): T[] => {
     if (!cutoff) return rows;
     return rows.filter((r) => ts(r.created_at) > cutoff);
   }, []);
 
-  const reloadPrograms = useCallback(async () => {
-    const [progRes, eventRes] = await Promise.all([
+  const loadProgramEvents = useCallback((force = false): Promise<any[]> => {
+    if (!force && programEventsRef.current !== null) {
+      return Promise.resolve(programEventsRef.current);
+    }
+    if (!force && programEventsRequestRef.current) {
+      return programEventsRequestRef.current;
+    }
+
+    let request: Promise<any[]>;
+    request = db('scout_program_events')
+      .eq('user_email', email)
+      .orderBy('id', 'asc')
+      .limit(1000)
+      .get()
+      .then(({ data }: any) => {
+        const rows = Array.isArray(data) ? data : [];
+        programEventsRef.current = rows;
+        return rows;
+      })
+      // Do not cache a failed request as an authoritative empty history.
+      .catch(() => [])
+      .finally(() => {
+        if (programEventsRequestRef.current === request) {
+          programEventsRequestRef.current = null;
+        }
+      });
+    programEventsRequestRef.current = request;
+    return request;
+  }, [email]);
+
+  const reloadPrograms = useCallback(async (resetReady?: Promise<number>, refreshEvents = false) => {
+    const [progRes, events, cutoff] = await Promise.all([
       db('scout_programs').eq('user_email', email).orderBy('updated_at', 'desc').limit(300).get(),
-      db('scout_program_events')
-        .eq('user_email', email)
-        .orderBy('id', 'asc')
-        .limit(1000)
-        .get()
-        .catch(() => ({ data: [] })),
+      loadProgramEvents(refreshEvents),
+      resetReady ?? Promise.resolve(resetCutoffRef.current),
     ]);
-    const rows = afterReset(Array.isArray(progRes.data) ? (progRes.data as ProgramRow[]) : []);
+    const rows = afterReset(Array.isArray(progRes.data) ? (progRes.data as ProgramRow[]) : [], cutoff);
     // Overlay durable status events (oldest → newest) onto the base rows.
     const byId = new Map<number, ProgramRow>(rows.map((r) => [r.id, r]));
-    for (const ev of Array.isArray(eventRes.data) ? eventRes.data : []) {
+    for (const ev of events) {
       const target = byId.get(Number(ev.program_id));
       const patch = asObj<Record<string, any> | null>(ev.patch_json, null);
       if (target && patch && typeof patch === 'object') Object.assign(target, patch);
     }
     setPrograms(rows);
-  }, [email, afterReset]);
+  }, [email, afterReset, loadProgramEvents]);
 
-  const reloadDocuments = useCallback(async () => {
-    const { data } = await db('scout_documents').eq('user_email', email).orderBy('created_at', 'desc').limit(100).get();
+  const reloadDocuments = useCallback(async (resetReady?: Promise<number>) => {
+    const [{ data }, cutoff] = await Promise.all([
+      db('scout_documents').eq('user_email', email).orderBy('created_at', 'desc').limit(100).get(),
+      resetReady ?? Promise.resolve(resetCutoffRef.current),
+    ]);
     // Same-kind uploads supersede: only the newest document per category is
     // live (a re-uploaded resume replaces the old one; a GMAT report and a
     // resume coexist). Older versions stay in the table as history only.
-    setDocuments(dedupeDocumentsByCategory(afterReset(Array.isArray(data) ? data : [])));
+    setDocuments(dedupeDocumentsByCategory(afterReset(Array.isArray(data) ? data : [], cutoff)));
   }, [email, afterReset]);
 
-  const reloadMessages = useCallback(async () => {
-    const { data } = await db('scout_messages').eq('user_email', email).orderBy('created_at', 'desc').limit(200).get();
-    const rows = afterReset(Array.isArray(data) ? data : []).reverse();
+  const reloadMessages = useCallback(async (resetReady?: Promise<number>) => {
+    const [{ data }, cutoff] = await Promise.all([
+      db('scout_messages').eq('user_email', email).orderBy('created_at', 'desc').limit(200).get(),
+      resetReady ?? Promise.resolve(resetCutoffRef.current),
+    ]);
+    const rows = afterReset(Array.isArray(data) ? data : [], cutoff).reverse();
     // Sessions that raced the history load once persisted duplicate intro
     // greetings; keep only the oldest so old accounts render (and prompt the
     // agent with) a clean transcript.
@@ -423,27 +650,40 @@ export function useScoutStore(): ScoutStore {
 
   const applyState = useCallback((nextIntake: IntakeData, nextBrief: BriefData, nextProfile: ProfileData) => {
     latest.current = { intake: nextIntake, brief: nextBrief, profile: nextProfile };
+    profileRevisionRef.current = nextProfile.bioGeneration?.revision || crypto.randomUUID();
     setIntake(nextIntake);
     setBrief(nextBrief);
     setProfile(nextProfile);
   }, []);
 
-  const reloadState = useCallback(async () => {
-    const cutoff = resetCutoffRef.current;
-    let row: any = null;
-    try {
-      const { data } = await db('scout_state_snapshots').eq('user_email', email).orderBy('id', 'desc').limit(1).get();
-      const snap = Array.isArray(data) && data.length ? data[0] : null;
-      if (snap && (!cutoff || ts(snap.created_at) > cutoff)) row = snap;
-    } catch {
-      // fall through to the legacy row
-    }
-    if (!row) {
-      // Legacy one-row-per-user store — kept as a read-only migration source
-      // for users whose state predates snapshots. Never written anymore.
-      const { data } = await db('scout_user_state').eq('user_email', email).orderBy('updated_at', 'desc').limit(1).get();
-      const legacy = Array.isArray(data) && data.length ? data[0] : null;
-      if (legacy && (!cutoff || Math.max(ts(legacy.updated_at), ts(legacy.created_at)) > cutoff)) row = legacy;
+  const reloadState = useCallback(async (resetReady?: Promise<number>) => {
+    // Fetch both stores immediately. Snapshots remain authoritative when both
+    // contain a valid row; the legacy store is only a read-only fallback.
+    const [snapshotResult, legacyResult, cutoff] = await Promise.all([
+      db('scout_state_snapshots')
+        .eq('user_email', email)
+        .orderBy('id', 'desc')
+        .limit(1)
+        .get()
+        .then(({ data }: any) => ({ data, error: null }))
+        .catch((error: unknown) => ({ data: [], error })),
+      db('scout_user_state')
+        .eq('user_email', email)
+        .orderBy('updated_at', 'desc')
+        .limit(1)
+        .get()
+        .then(({ data }: any) => ({ data, error: null }))
+        .catch((error: unknown) => ({ data: [], error })),
+      resetReady ?? Promise.resolve(resetCutoffRef.current),
+    ]);
+    const snap = Array.isArray(snapshotResult.data) && snapshotResult.data.length ? snapshotResult.data[0] : null;
+    const legacy = Array.isArray(legacyResult.data) && legacyResult.data.length ? legacyResult.data[0] : null;
+    const validSnapshot = snap && (!cutoff || ts(snap.created_at) > cutoff) ? snap : null;
+    const validLegacy =
+      legacy && (!cutoff || Math.max(ts(legacy.updated_at), ts(legacy.created_at)) > cutoff) ? legacy : null;
+    const row = validSnapshot || validLegacy;
+    if (!row && (snapshotResult.error || legacyResult.error)) {
+      throw snapshotResult.error || legacyResult.error;
     }
     if (!row) {
       applyState(emptyIntake(), emptyBrief(), emptyProfile(identity.name));
@@ -454,7 +694,7 @@ export function useScoutStore(): ScoutStore {
     if (!nextIntake.answers || typeof nextIntake.answers !== 'object') nextIntake.answers = {};
     const prof = asObj<ProfileData | null>(row.profile_json, null);
     applyState(
-      nextIntake,
+      normalizeIntakeEligibility(nextIntake),
       normalizeBrief(asObj<any>(row.brief_json, null)),
       prof && typeof prof === 'object' ? { ...emptyProfile(identity.name), ...prof } : emptyProfile(identity.name)
     );
@@ -465,8 +705,15 @@ export function useScoutStore(): ScoutStore {
     let cancelled = false;
     (async () => {
       try {
-        await loadResetCutoff();
-        await Promise.all([reloadPrograms(), reloadDocuments(), reloadMessages(), reloadState(), reloadInvitations()]);
+        const resetReady = loadResetCutoff();
+        await Promise.all([
+          resetReady,
+          reloadPrograms(resetReady),
+          reloadDocuments(resetReady),
+          reloadMessages(resetReady),
+          reloadState(resetReady),
+          reloadInvitations(),
+        ]);
         if (!cancelled) setLoadError('');
       } catch (err) {
         if (!cancelled) setLoadError(err instanceof Error ? err.message : 'Could not load your data.');
@@ -497,6 +744,24 @@ export function useScoutStore(): ScoutStore {
           profile_json: latest.current.profile,
           source: 'app',
         });
+        const normalized = normalizeIntakeEligibility(latest.current.intake);
+        await analyticsDb('inbox_student_profile_snapshots').insert({
+          student_id: email,
+          intake_json: normalized,
+          profile_json: latest.current.profile,
+          citizenship_countries: normalized.citizenshipCountries || [],
+          international_only: !!normalized.internationalOnly,
+          programme_interests: normalized.programmeInterests || [],
+          apprenticeship_opt_in: !!normalized.apprenticeshipOptIn,
+          apprenticeship_eligible_countries: normalized.apprenticeshipEligibleCountries || [],
+          academic_level: normalized.programLevel || normalized.answers.level || null,
+          subject_interests: String(normalized.answers.majors || '')
+            .split(/[,;|]/)
+            .map((value) => value.trim())
+            .filter(Boolean),
+          last_active: new Date().toISOString(),
+          source: 'scout',
+        });
       } catch (err) {
         snapshotDirty.current = true; // the next save retries this state
         throw err;
@@ -507,42 +772,211 @@ export function useScoutStore(): ScoutStore {
     return next;
   }, [email]);
 
-  const saveIntake = useCallback(
-    async (next: IntakeData) => {
-      // Callers (agent turns) may hold a stale intake copy; invitation read
-      // receipts recorded meanwhile must never be un-read by their save.
-      const readIds = Array.from(
-        new Set([...(latest.current.intake.readInvitationIds || []), ...(next.readInvitationIds || [])].map(Number))
-      );
-      const withCompleted: IntakeData = {
-        ...next,
-        ...(readIds.length ? { readInvitationIds: readIds } : {}),
-        completed: intakeCompleted(next),
-      };
-      latest.current.intake = withCompleted;
-      setIntake(withCompleted);
+  const applyProfileSave = useCallback(
+    (next: ProfileData, options?: ProfileSaveOptions): ProfileSaveReceipt => {
+      const current = latest.current.profile;
+      if (options?.expectedFactsKey && profileFactsKey(current) !== options.expectedFactsKey) {
+        throw new Error('stale_profile_revision');
+      }
+      const factsChanged = profileFactsKey(next) !== profileFactsKey(current);
+      let revision = current.bioGeneration?.revision || profileRevisionRef.current;
+      let prepared: ProfileData;
+
+      if (options?.bioAlreadyGenerated) {
+        revision = crypto.randomUUID();
+        prepared = {
+          ...next,
+          bioGeneration: {
+            revision,
+            status: 'ready',
+            completedAt: new Date().toISOString(),
+          },
+        };
+      } else if (factsChanged) {
+        revision = crypto.randomUUID();
+        prepared = profileHasBioFacts(next)
+          ? {
+              ...next,
+              bio: '',
+              bioGeneration: {
+                revision,
+                status: 'pending',
+                attemptedAt: new Date().toISOString(),
+              },
+            }
+          : {
+              ...next,
+              bio: '',
+              bioGeneration: {
+                revision,
+                status: 'ready',
+                completedAt: new Date().toISOString(),
+              },
+            };
+      } else {
+        // A derived or operational save must never restore an older Bio or its
+        // status from a stale caller snapshot.
+        prepared = {
+          ...next,
+          bio: current.bio,
+          bioGeneration: current.bioGeneration,
+        };
+      }
+
+      profileRevisionRef.current = revision;
+      latest.current.profile = prepared;
+      setProfile(prepared);
+      return { revision, profile: prepared };
+    },
+    []
+  );
+
+  const saveState = useCallback(
+    async (next: ScoutStatePatch) => {
+      if (!next.intake && !next.brief && !next.profile) return;
+
+      if (next.intake) {
+        // Callers (agent turns) may hold a stale intake copy; invitation read
+        // receipts recorded meanwhile must never be un-read by their save.
+        const readIds = Array.from(
+          new Set(
+            [...(latest.current.intake.readInvitationIds || []), ...(next.intake.readInvitationIds || [])].map(Number)
+          )
+        );
+        const withCompleted: IntakeData = normalizeIntakeEligibility({
+          ...next.intake,
+          ...(readIds.length ? { readInvitationIds: readIds } : {}),
+          completed: intakeCompleted(next.intake),
+        });
+        latest.current.intake = withCompleted;
+        setIntake(withCompleted);
+      }
+
+      if (next.brief) {
+        // Every write path (agent actions, answer reconciliation, manual chip
+        // edits) goes through here, so dedupe/cleanup happens exactly once.
+        const stamped = { ...sanitizeBrief(next.brief), updatedAt: new Date().toISOString() };
+        latest.current.brief = stamped;
+        setBrief(stamped);
+      }
+
+      if (next.profile) {
+        // saveState's current profile caller is deterministic intake capture,
+        // which owns only visibility and lookingFor. Rebase those fields onto
+        // the latest facts so an older agent turn cannot restore stale arrays.
+        applyProfileSave({
+          ...latest.current.profile,
+          visible: next.profile.visible,
+          lookingFor: next.profile.lookingFor,
+        });
+      }
+
+      // All supplied mutations are now reflected in `latest`, so this insert
+      // persists one complete snapshot regardless of how many slices changed.
       await writeSnapshot();
     },
-    [writeSnapshot]
+    [applyProfileSave, writeSnapshot]
+  );
+
+  const saveIntake = useCallback(
+    async (next: IntakeData) => {
+      await saveState({ intake: next });
+    },
+    [saveState]
   );
 
   const saveBrief = useCallback(
     async (next: BriefData) => {
-      // Every write path (agent actions, answer reconciliation, manual chip
-      // edits) goes through here, so dedupe/cleanup happens exactly once.
-      const stamped = { ...sanitizeBrief(next), updatedAt: new Date().toISOString() };
-      latest.current.brief = stamped;
-      setBrief(stamped);
+      await saveState({ brief: next });
+    },
+    [saveState]
+  );
+
+  const saveProfile = useCallback(
+    async (next: ProfileData, options?: ProfileSaveOptions): Promise<ProfileSaveReceipt> => {
+      const receipt = applyProfileSave(next, options);
       await writeSnapshot();
+      return receipt;
+    },
+    [applyProfileSave, writeSnapshot]
+  );
+
+  const commitGeneratedBio = useCallback(
+    async (revision: string, bio: string): Promise<boolean> => {
+      const value = bio.trim().slice(0, 1200);
+      const current = latest.current.profile;
+      if (!value) throw new Error('Cannot commit an empty generated Bio.');
+      if (profileRevisionRef.current !== revision || current.bioGeneration?.revision !== revision) return false;
+      if (current.bioGeneration.status !== 'pending') return false;
+
+      const next: ProfileData = {
+        ...current,
+        bio: value,
+        bioGeneration: {
+          revision,
+          status: 'ready',
+          completedAt: new Date().toISOString(),
+        },
+      };
+      latest.current.profile = next;
+      setProfile(next);
+      await writeSnapshot();
+      return true;
     },
     [writeSnapshot]
   );
 
-  const saveProfile = useCallback(
-    async (next: ProfileData) => {
+  const failGeneratedBio = useCallback(
+    async (revision: string, errorCode: string): Promise<boolean> => {
+      const current = latest.current.profile;
+      if (profileRevisionRef.current !== revision || current.bioGeneration?.revision !== revision) return false;
+      if (current.bioGeneration.status !== 'pending') return false;
+
+      const next: ProfileData = {
+        ...current,
+        bio: '',
+        bioGeneration: {
+          revision,
+          status: 'failed',
+          attemptedAt: current.bioGeneration.attemptedAt,
+          completedAt: new Date().toISOString(),
+          errorCode: errorCode.slice(0, 80),
+        },
+      };
       latest.current.profile = next;
       setProfile(next);
       await writeSnapshot();
+      return true;
+    },
+    [writeSnapshot]
+  );
+
+  const commitProfileItemSummary = useCallback(
+    async (
+      revision: string,
+      section: ProfileSummarySection,
+      index: number | null,
+      summary: string
+    ): Promise<boolean> => {
+      const value = summary.trim().slice(0, 400);
+      if (!value || profileRevisionRef.current !== revision) return false;
+      const current = latest.current.profile;
+      let next: ProfileData;
+
+      if (section === 'skills') {
+        next = { ...current, skillsSummary: value };
+      } else {
+        if (index == null || !current[section][index]) return false;
+        const items = current[section].map((item, itemIndex) =>
+          itemIndex === index ? { ...item, aiSummary: value } : item
+        );
+        next = { ...current, [section]: items } as ProfileData;
+      }
+
+      latest.current.profile = next;
+      setProfile(next);
+      await writeSnapshot();
+      return true;
     },
     [writeSnapshot]
   );
@@ -552,17 +986,32 @@ export function useScoutStore(): ScoutStore {
       const current = programsRef.current.find((p) => p.id === id);
       if (!current || current.status === next) return;
       const patch = statusPatch(current, next, feedback);
+      let eventWritten = false;
       // Optimistic: the carousel/board advance immediately; the reload trues things up.
       setPrograms((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
       try {
         // The event insert is what makes the change durable; the direct row
         // update is best-effort so the base table stays readable on its own.
         await db('scout_program_events').insert({ user_email: email, program_id: id, patch_json: patch });
+        const programKey = current.website || `${current.university}:${current.program_name}`.toLowerCase();
+        await analyticsDb('inbox_student_program_interactions').insert({
+          student_id: email,
+          program_key: programKey,
+          program_id: id,
+          program_name: current.program_name,
+          interaction_type: next,
+          program_type: current.program_type || null,
+          country_code: current.country_code || null,
+          metadata_json: { patch, feedback: feedback || null, institution: current.university },
+          occurred_at: new Date().toISOString(),
+        });
+        eventWritten = true;
         db('scout_programs')
           .update(id, patch)
           .catch(() => undefined);
       } finally {
-        reloadPrograms().catch(() => undefined);
+        // Refresh event history only when the durable insert succeeded.
+        reloadPrograms(undefined, eventWritten).catch(() => undefined);
       }
     },
     [email, reloadPrograms]
@@ -571,14 +1020,17 @@ export function useScoutStore(): ScoutStore {
   const updateProgram = useCallback(
     async (id: number, patch: Record<string, any>) => {
       if (!patch || !Object.keys(patch).length) return;
+      let eventWritten = false;
       setPrograms((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
       try {
         await db('scout_program_events').insert({ user_email: email, program_id: id, patch_json: patch });
+        eventWritten = true;
         db('scout_programs')
           .update(id, patch)
           .catch(() => undefined);
       } finally {
-        reloadPrograms().catch(() => undefined);
+        // Refresh event history only when the durable insert succeeded.
+        reloadPrograms(undefined, eventWritten).catch(() => undefined);
       }
     },
     [email, reloadPrograms]
@@ -601,12 +1053,53 @@ export function useScoutStore(): ScoutStore {
         duration: item.duration || null,
         website: item.website || null,
         summary: item.summary || null,
+        program_type: item.program_type || (latest.current.intake.programLevel === 'graduate' ? 'masters' : 'undergrad'),
+        country_code: item.country_code || null,
+        country_name: item.country_name || null,
+        company_name: item.company_name || null,
+        eligibility_notes: item.eligibility_notes || null,
+        active_status: item.active_status || 'active',
+        last_seen_active: item.last_seen_active || new Date().toISOString(),
         fit_reasons: JSON.stringify(item.fit_reasons || []),
         status: 'recommended',
         // Stagger stamps so reverse-chron keeps the AI's fit order within a batch.
         recommended_at: new Date(base - i * 1000).toISOString(),
       }));
       await db('scout_programs').bulkInsert(rows);
+      await Promise.all(
+        rows.map(async (row) => {
+          const programKey = row.website || `${row.university}:${row.program_name}`.toLowerCase();
+          await Promise.all([
+            analyticsDb('inbox_program_catalog_events').insert({
+              student_id: email,
+              program_key: programKey,
+              institution_name: row.program_type === 'apprenticeship' ? null : row.university,
+              company_name: row.company_name || (row.program_type === 'apprenticeship' ? row.university : null),
+              program_name: row.program_name,
+              program_type: row.program_type,
+              country_code: row.country_code,
+              country_name: row.country_name,
+              eligibility_notes: row.eligibility_notes,
+              source_url: row.website,
+              active_status: row.active_status,
+              first_discovered: row.recommended_at,
+              last_seen_active: row.last_seen_active,
+              programme_json: row,
+            }),
+            analyticsDb('inbox_student_program_interactions').insert({
+              student_id: email,
+              program_key: programKey,
+              program_id: null,
+              program_name: row.program_name,
+              interaction_type: 'recommended',
+              program_type: row.program_type,
+              country_code: row.country_code,
+              metadata_json: { institution: row.university, source_url: row.website },
+              occurred_at: row.recommended_at,
+            }),
+          ]);
+        })
+      );
       await reloadPrograms();
       return rows.length;
     },
@@ -668,13 +1161,24 @@ export function useScoutStore(): ScoutStore {
 
   const persistMessage = useCallback(
     async (m: Pick<MessageRow, 'role' | 'content'> & { attachments?: MessageAttachment[]; actions?: string[] }) => {
-      await db('scout_messages').insert({
-        user_email: email,
-        role: m.role,
-        content: m.content,
-        attachments: JSON.stringify(m.attachments || []),
-        actions: JSON.stringify(m.actions || []),
-      });
+      const pendingField = m.role === 'user' ? nextIntakeQuestion(latest.current.intake)?.id || null : null;
+      await Promise.all([
+        db('scout_messages').insert({
+          user_email: email,
+          role: m.role,
+          content: m.content,
+          attachments: JSON.stringify(m.attachments || []),
+          actions: JSON.stringify(m.actions || []),
+        }),
+        analyticsDb('inbox_student_interactions').insert({
+          student_id: email,
+          event_type: m.role === 'user' ? 'conversation_answer' : 'assistant_reply',
+          field_name: pendingField,
+          answer_text: m.content,
+          metadata_json: { attachments: m.attachments || [], actions: m.actions || [] },
+          occurred_at: new Date().toISOString(),
+        }),
+      ]);
     },
     [email]
   );
@@ -747,7 +1251,9 @@ export function useScoutStore(): ScoutStore {
     [programs]
   );
 
-  const displayName = profile.name?.trim() || identity.name || (identity.email ? identity.email.split('@')[0] : 'Student');
+  const displayName = toTitleCaseName(
+    profile.name?.trim() || identity.name || (identity.email ? identity.email.split('@')[0] : 'Student')
+  );
 
   return {
     email,
@@ -771,9 +1277,13 @@ export function useScoutStore(): ScoutStore {
     setStatus,
     updateProgram,
     addPrograms,
+    saveState,
     saveIntake,
     saveBrief,
     saveProfile,
+    commitGeneratedBio,
+    failGeneratedBio,
+    commitProfileItemSummary,
     addDocument,
     markDocumentAsResume,
     appendLocalMessage,

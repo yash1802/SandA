@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useLayoutEffect, useState, useMemo } from 'react';
 import { CheckCircle2, ChevronRight, Loader2, ClipboardList } from 'lucide-react';
 import { tw, typography, cn } from '../lib/colors';
 import type { SurveyConfig, SurveyQuestion, AnswerValue } from '../lib/surveyDefinitions';
@@ -204,7 +204,9 @@ function QuestionField({
     const current = (value as { selected: string[]; otherText?: string }) || { selected: [] };
     const toggle = (val: string) => {
       const selected = current.selected.includes(val)
-        ? current.selected.filter((s) => s !== val)
+        ? current.selected.length > 1 || !question.required
+          ? current.selected.filter((s) => s !== val)
+          : current.selected
         : [...current.selected, val];
       onChange({ selected, otherText: val === 'other' && !selected.includes('other') ? '' : current.otherText });
     };
@@ -292,6 +294,33 @@ export default function ResearchSurveyForm({ config, accent = 'primary' }: Resea
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
 
+  // Public survey pages own their scrolling. Keeping the document itself
+  // fixed prevents focus and late font swaps from moving the body viewport.
+  useLayoutEffect(() => {
+    const html = document.documentElement;
+    const body = document.body;
+    const previous = {
+      htmlOverflow: html.style.overflow,
+      htmlOverflowAnchor: html.style.overflowAnchor,
+      bodyOverflow: body.style.overflow,
+      bodyOverflowAnchor: body.style.overflowAnchor,
+    };
+
+    html.style.overflow = 'hidden';
+    html.style.overflowAnchor = 'none';
+    body.style.overflow = 'hidden';
+    body.style.overflowAnchor = 'none';
+    html.scrollTop = 0;
+    body.scrollTop = 0;
+
+    return () => {
+      html.style.overflow = previous.htmlOverflow;
+      html.style.overflowAnchor = previous.htmlOverflowAnchor;
+      body.style.overflow = previous.bodyOverflow;
+      body.style.overflowAnchor = previous.bodyOverflowAnchor;
+    };
+  }, []);
+
   const part1Questions = useMemo(() => getPartQuestions(config, 1), [config]);
   const part2Questions = useMemo(() => getPartQuestions(config, 2), [config]);
 
@@ -317,7 +346,7 @@ export default function ResearchSurveyForm({ config, accent = 'primary' }: Resea
 
   if (phase === 'complete') {
     return (
-      <div className="min-h-full flex items-center justify-center p-6" style={{ background: SURVEY_GRADIENT }}>
+      <div className="min-h-full h-full overflow-y-auto overscroll-y-contain flex items-center justify-center p-6" style={{ background: SURVEY_GRADIENT }}>
         <div className={cn(tw.card.elevated, 'max-w-md w-full p-8 text-center')}>
           <div
             className={cn(
@@ -339,7 +368,7 @@ export default function ResearchSurveyForm({ config, accent = 'primary' }: Resea
 
   if (phase === 'transition') {
     return (
-      <div className="min-h-full flex items-center justify-center p-6" style={{ background: SURVEY_GRADIENT }}>
+      <div className="min-h-full h-full overflow-y-auto overscroll-y-contain flex items-center justify-center p-6" style={{ background: SURVEY_GRADIENT }}>
         <div className={cn(tw.card.elevated, 'max-w-lg w-full p-6 sm:p-8')}>
           <p className={cn('text-xs font-medium uppercase tracking-wide mb-3', typography.color.tertiary)}>{brand.persona} · Part 1 complete</p>
           <p className={cn('text-sm leading-relaxed mb-4', typography.color.secondary)}>{config.transitionCopy}</p>
@@ -398,7 +427,7 @@ export default function ResearchSurveyForm({ config, accent = 'primary' }: Resea
 
   return (
     <div className="min-h-full h-full flex flex-col overflow-y-auto overscroll-y-contain" style={{ background: SURVEY_GRADIENT }}>
-      <div className="flex-1 max-w-xl mx-auto w-full px-4 py-6 sm:py-10 pb-28">
+      <div className="flex-1 max-w-xl mx-auto w-full px-4 pt-6 sm:pt-10 pb-36">
         <header className="mb-8">
           <div className="flex items-center gap-3 mb-4">
             <div className={cn(

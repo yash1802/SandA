@@ -4,7 +4,7 @@
 // factor buckets. Includes the "Add File" manual upload.
 
 import { useRef, useState } from 'react';
-import { ArrowLeft, Calendar, ExternalLink, FileText, Loader2, Plus, Search, Upload, X } from 'lucide-react';
+import { AlertCircle, ArrowLeft, Calendar, ExternalLink, FileText, Loader2, Plus, Search, Upload, X } from 'lucide-react';
 import { cn, tw, typography } from '../../lib/colors';
 import { AgentDeps, parseResumePdf } from './scout-agent';
 import { uploadPdf, useScout } from './scout-store';
@@ -218,10 +218,13 @@ export default function ScoutDocuments() {
 
   const handleFiles = async (list: FileList | null) => {
     if (!list || uploading) return;
-    const pdfs = Array.from(list)
-      .filter((f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'))
-      .slice(0, MAX_FILES);
-    setNote(pdfs.length < list.length ? 'Only PDF files are supported.' : '');
+    const files = Array.from(list);
+    const supportedFiles = files.filter(
+      (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
+    );
+    const pdfs = supportedFiles.slice(0, MAX_FILES);
+    const hasUnsupportedFile = supportedFiles.length < files.length;
+    setNote(hasUnsupportedFile ? 'Only PDF files are supported. Please select a PDF file.' : '');
     if (fileInputRef.current) fileInputRef.current.value = '';
 
     for (const file of pdfs) {
@@ -239,11 +242,14 @@ export default function ScoutDocuments() {
         // The resume pipeline runs for every upload path, including manual adds.
         setUploading(`Analyzing ${file.name}…`);
         const deps: AgentDeps = { ...store, setWorking: () => undefined };
-        const parsed = await parseResumePdf(up.url, file.name, deps, file).catch(() => null);
-        if (parsed) {
+        const result = await parseResumePdf(up.url, file.name, deps, file);
+        if (result.status === 'complete' || result.status === 'partial') {
           await markDocumentAsResume(up.url).catch(() => undefined);
+          if (result.status === 'partial') setNote(`${result.message}.`);
+        } else if (result.status === 'failure') {
+          setNote(`${result.message}. Please try uploading the PDF again.`);
         } else if (/resume|cv/i.test(file.name)) {
-          setNote(`Saved ${file.name}, but couldn't extract profile details from it.`);
+          setNote(`Saved ${file.name}, but it doesn't appear to contain a resume.`);
         }
       } catch {
         setNote(`Couldn't upload ${file.name} — please try again.`);
@@ -306,7 +312,24 @@ export default function ScoutDocuments() {
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
-        {note && <p className={`text-xs mb-3 ${typography.color.danger}`}>{note}</p>}
+        {note && (
+          <div
+            role="alert"
+            aria-live="assertive"
+            className="mb-4 flex items-start gap-2.5 rounded-xl border border-[var(--space-semantic-danger)] bg-[color-mix(in_srgb,var(--space-semantic-danger)_10%,transparent)] px-3.5 py-3"
+          >
+            <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--space-semantic-danger)]" />
+            <p className={`flex-1 text-sm font-medium ${typography.color.danger}`}>{note}</p>
+            <button
+              type="button"
+              onClick={() => setNote('')}
+              className="rounded-md p-0.5 text-[var(--space-semantic-danger)] transition-colors hover:bg-[color-mix(in_srgb,var(--space-semantic-danger)_15%,transparent)]"
+              aria-label="Dismiss notification"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        )}
         <div className="grid grid-cols-[repeat(auto-fill,minmax(170px,1fr))] gap-3">
           {/* Scout's internal Search Brief is always present */}
           <button

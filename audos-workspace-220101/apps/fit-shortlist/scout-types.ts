@@ -26,6 +26,13 @@ export interface ProgramRow {
   university: string;
   program_name: string;
   degree_type?: string | null;
+  program_type?: 'undergrad' | 'masters' | 'apprenticeship' | string | null;
+  country_code?: string | null;
+  country_name?: string | null;
+  company_name?: string | null;
+  eligibility_notes?: string | null;
+  active_status?: 'active' | 'uncertain' | 'inactive' | string | null;
+  last_seen_active?: string | null;
   location?: string | null;
   tuition?: string | null;
   deadline?: string | null;
@@ -171,6 +178,16 @@ export interface MiscItem {
   detail: string;
 }
 
+export type BioGenerationStatus = 'pending' | 'ready' | 'failed';
+
+export interface BioGenerationState {
+  revision: string;
+  status: BioGenerationStatus;
+  attemptedAt?: string;
+  completedAt?: string;
+  errorCode?: string;
+}
+
 export interface ProfileData {
   name: string;
   headline: string;
@@ -185,11 +202,48 @@ export interface ProfileData {
   skillsSummary: string;
   extracurriculars: ExtraItem[];
   misc: MiscItem[];
+  // Durable status for the factual Profile revision that owns the Bio.
+  // Kept inside profile_json so interrupted generation is observable on reload.
+  bioGeneration?: BioGenerationState;
   // Raw text of the most recently parsed resume, kept so Scout can always
   // answer from the resume in chat and re-derive profile sections on demand.
   resumeText?: string;
   resumeSourceUrl?: string;
   resumeParsedAt?: string;
+}
+
+// Canonical source facts that determine the Bio. Visibility, search preferences,
+// AI summaries, and resume bookkeeping are deliberately excluded so those
+// changes never create an unnecessary generation request.
+export function profileFactsForBio(profile: ProfileData) {
+  return {
+    name: profile.name,
+    headline: profile.headline,
+    location: profile.location,
+    education: profile.education.map(({ aiSummary: _aiSummary, ...item }) => item),
+    work: profile.work.map(({ aiSummary: _aiSummary, ...item }) => item),
+    research: profile.research.map(({ aiSummary: _aiSummary, ...item }) => item),
+    skills: profile.skills,
+    extracurriculars: profile.extracurriculars.map(({ aiSummary: _aiSummary, ...item }) => item),
+    misc: profile.misc,
+  };
+}
+
+export function profileFactsKey(profile: ProfileData): string {
+  return JSON.stringify(profileFactsForBio(profile));
+}
+
+export function profileHasBioFacts(profile: ProfileData): boolean {
+  return !!(
+    profile.headline.trim() ||
+    profile.location.trim() ||
+    profile.education.length ||
+    profile.work.length ||
+    profile.research.length ||
+    profile.skills.length ||
+    profile.extracurriculars.length ||
+    profile.misc.length
+  );
 }
 
 // True when a resume exists but its substance never made it into the profile
@@ -253,7 +307,7 @@ export const BUCKET_DEFS: {
     dotClass: 'bg-emerald-500',
     labelClass: 'text-emerald-700',
     chipClass: 'bg-emerald-50 border-emerald-100 text-emerald-900',
-    addClass: 'border-emerald-200 bg-emerald-50/40 hover:border-emerald-400 text-emerald-700/70',
+    addClass: 'border-emerald-200 bg-emerald-50/40 hover:border-emerald-400 text-emerald-700',
   },
   {
     key: 'good',
@@ -261,7 +315,7 @@ export const BUCKET_DEFS: {
     dotClass: 'bg-sky-500',
     labelClass: 'text-sky-700',
     chipClass: 'bg-sky-50 border-sky-100 text-sky-900',
-    addClass: 'border-sky-200 bg-sky-50/40 hover:border-sky-400 text-sky-700/70',
+    addClass: 'border-sky-200 bg-sky-50/40 hover:border-sky-400 text-sky-700',
   },
   {
     key: 'borderline',
@@ -269,7 +323,7 @@ export const BUCKET_DEFS: {
     dotClass: 'bg-amber-500',
     labelClass: 'text-amber-700',
     chipClass: 'bg-amber-50 border-amber-100 text-amber-900',
-    addClass: 'border-amber-200 bg-amber-50/40 hover:border-amber-400 text-amber-700/70',
+    addClass: 'border-amber-200 bg-amber-50/40 hover:border-amber-400 text-amber-700',
   },
   {
     key: 'notAFit',
@@ -277,7 +331,7 @@ export const BUCKET_DEFS: {
     dotClass: 'bg-red-500',
     labelClass: 'text-red-700',
     chipClass: 'bg-red-50 border-red-100 text-red-900',
-    addClass: 'border-red-200 bg-red-50/40 hover:border-red-400 text-red-700/70',
+    addClass: 'border-red-200 bg-red-50/40 hover:border-red-400 text-red-700',
   },
 ];
 
@@ -413,9 +467,22 @@ export function briefHasInvalidEntries(brief: BriefData): boolean {
 // ---------------------------------------------------------------------------
 // Intake question checklist (state machine persisted in scout_user_state.intake_json)
 
+export type ResidencyStatus = 'citizen' | 'permanent_resident' | 'neither';
+
+export interface CountryResidency {
+  country_code: string;
+  country_name: string;
+  status: ResidencyStatus;
+}
+
 export interface IntakeData {
   answers: Record<string, string>;
   programLevel?: 'undergraduate' | 'graduate' | '';
+  programmeInterests?: Array<'undergrad' | 'masters' | 'apprenticeships'>;
+  citizenshipCountries?: CountryResidency[];
+  apprenticeshipOptIn?: boolean;
+  apprenticeshipEligibleCountries?: string[];
+  internationalOnly?: boolean;
   completed?: boolean;
   // Ids of scout_application_requests rows the student has already seen.
   // Kept in the durable state snapshot because in-place row updates proved
@@ -434,22 +501,25 @@ export interface IntakeQuestion {
 }
 
 export const INTAKE_QUESTIONS: IntakeQuestion[] = [
-  { id: 'majors', text: 'What majors are you interested in?' },
-  { id: 'level', text: 'Are you interested in undergraduate or graduate programs?' },
+  { id: 'majors', text: 'What subjects or career areas are you interested in?' },
+  {
+    id: 'level',
+    text: "Which routes would you like Scout to explore? Choose any combination: undergraduate programmes, master's programmes, and apprenticeships.",
+  },
   {
     id: 'motivations',
-    text: 'What are your primary reasons for pursuing higher education (Universities often want to know what motivated an applicant)?',
+    text: 'What are your primary reasons for pursuing higher education? For example: changing careers into a new industry, deepening technical expertise, qualifying for a professional designation like the CFA, gaining international experience, or following a specific research interest.',
     gradOnly: true,
   },
   { id: 'locations', text: 'What locations are you keen on (cities, countries, regions, etc)?' },
-  { id: 'budget', text: 'What is your budget for tuition (in USD)?' },
+  { id: 'budget', text: 'What is your annual tuition budget (in USD)?' },
   {
     id: 'tests',
     text: 'Have you taken any standardized tests (SAT, ACT, TOEFL, IELTS, GRE, GMAT, etc)? If yes, which ones and what was your score? If not, then are you planning to take any?',
   },
   {
     id: 'citizenship',
-    text: 'What countries are you a citizen of (This helps us pitch you better to universities that are looking for international students, if applicable)?',
+    text: 'Tell me every country that applies to you and your status in each one: citizen, permanent resident, or neither. You can list as many as needed — for example, “UK citizen; US permanent resident; Canada neither”. This determines which local apprenticeship schemes you may be eligible for.',
   },
   {
     id: 'outcomes',
@@ -499,6 +569,80 @@ export function sniffProgramLevel(text: string): 'undergraduate' | 'graduate' | 
   if (grad && !undergrad) return 'graduate';
   if (undergrad && !grad) return 'undergraduate';
   return '';
+}
+
+const COUNTRY_ALIASES: Array<{ code: string; name: string; re: RegExp }> = [
+  { code: 'GB', name: 'United Kingdom', re: /\b(uk|u\.k\.|united kingdom|britain|british|england|scotland|wales)\b/i },
+  { code: 'US', name: 'United States', re: /\b(us|u\.s\.|usa|u\.s\.a\.|united states|american)\b/i },
+  { code: 'CA', name: 'Canada', re: /\b(canada|canadian)\b/i },
+  { code: 'AU', name: 'Australia', re: /\b(australia|australian)\b/i },
+  { code: 'NZ', name: 'New Zealand', re: /\b(new zealand|kiwi)\b/i },
+  { code: 'IE', name: 'Ireland', re: /\b(ireland|irish)\b/i },
+  { code: 'DE', name: 'Germany', re: /\b(germany|german)\b/i },
+  { code: 'FR', name: 'France', re: /\b(france|french)\b/i },
+  { code: 'NL', name: 'Netherlands', re: /\b(netherlands|dutch)\b/i },
+  { code: 'CH', name: 'Switzerland', re: /\b(switzerland|swiss)\b/i },
+  { code: 'AT', name: 'Austria', re: /\b(austria|austrian)\b/i },
+  { code: 'ES', name: 'Spain', re: /\b(spain|spanish)\b/i },
+  { code: 'IT', name: 'Italy', re: /\b(italy|italian)\b/i },
+  { code: 'SE', name: 'Sweden', re: /\b(sweden|swedish)\b/i },
+  { code: 'NO', name: 'Norway', re: /\b(norway|norwegian)\b/i },
+  { code: 'DK', name: 'Denmark', re: /\b(denmark|danish)\b/i },
+  { code: 'FI', name: 'Finland', re: /\b(finland|finnish)\b/i },
+  { code: 'IN', name: 'India', re: /\b(india|indian)\b/i },
+  { code: 'SG', name: 'Singapore', re: /\b(singapore|singaporean)\b/i },
+  { code: 'ZA', name: 'South Africa', re: /\b(south africa|south african)\b/i },
+  { code: 'AE', name: 'United Arab Emirates', re: /\b(uae|united arab emirates|emirati)\b/i },
+  { code: 'BR', name: 'Brazil', re: /\b(brazil|brazilian)\b/i },
+  { code: 'MX', name: 'Mexico', re: /\b(mexico|mexican)\b/i },
+];
+
+export function parseProgrammeInterests(raw: string): Array<'undergrad' | 'masters' | 'apprenticeships'> {
+  const text = String(raw || '').toLowerCase();
+  const out: Array<'undergrad' | 'masters' | 'apprenticeships'> = [];
+  if (/undergrad|bachelor|university/.test(text)) out.push('undergrad');
+  if (/master|graduate|postgrad|mba|msc/.test(text)) out.push('masters');
+  if (/apprenti|degree\s+apprentice|earn\s+and\s+learn/.test(text)) out.push('apprenticeships');
+  return out;
+}
+
+export function parseCountryResidencies(raw: string): CountryResidency[] {
+  const text = String(raw || '').trim();
+  if (!text) return [];
+  const segments = text.split(/\s*(?:;|,|\band\b|\balso\b)\s*/i).filter(Boolean);
+  const matches: Array<CountryResidency & { index: number }> = [];
+  for (const country of COUNTRY_ALIASES) {
+    const match = country.re.exec(text);
+    if (!match) continue;
+    const segment = segments.find((part) => country.re.test(part)) || text.slice(match.index, match.index + match[0].length + 24);
+    const status: ResidencyStatus = /\b(permanent\s+resident|permanent\s+residency|green\s+card|pr)\b/i.test(segment)
+      ? 'permanent_resident'
+      : /\b(neither|no\s+(?:citizenship|status|residency)|international(?:\s+only)?)\b/i.test(segment)
+        ? 'neither'
+        : 'citizen';
+    matches.push({ country_code: country.code, country_name: country.name, status, index: match.index });
+  }
+  return matches.sort((a, b) => a.index - b.index).map(({ index: _index, ...entry }) => entry);
+}
+
+export function normalizeIntakeEligibility(intake: IntakeData): IntakeData {
+  const programmeRaw = intake.answers.programmeTypes || intake.answers.level || '';
+  const citizenshipRaw = intake.answers.citizenshipResidency || intake.answers.citizenship || '';
+  const programmeInterests = parseProgrammeInterests(programmeRaw);
+  const citizenshipCountries = parseCountryResidencies(citizenshipRaw);
+  const apprenticeshipEligibleCountries = citizenshipCountries
+    .filter((entry) => entry.status === 'citizen' || entry.status === 'permanent_resident')
+    .map((entry) => entry.country_code);
+  return {
+    ...intake,
+    programmeInterests,
+    citizenshipCountries,
+    apprenticeshipOptIn: programmeInterests.includes('apprenticeships'),
+    apprenticeshipEligibleCountries: Array.from(new Set(apprenticeshipEligibleCountries)),
+    internationalOnly:
+      apprenticeshipEligibleCountries.length === 0 &&
+      (citizenshipCountries.length > 0 || /\b(international\s+only|no\s+(?:citizenship|permanent\s+residency|local\s+status)|neither\s+anywhere|none)\b/i.test(citizenshipRaw)),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +749,15 @@ export interface ProgramDetails {
 
 // ---------------------------------------------------------------------------
 // Display helpers
+
+export function toTitleCaseName(label: string): string {
+  return (label || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+    .join(' ');
+}
 
 export function getInitials(label: string): string {
   const parts = (label || '').trim().split(/\s+/).filter(Boolean);

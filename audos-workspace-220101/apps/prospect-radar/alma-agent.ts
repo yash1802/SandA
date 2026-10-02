@@ -60,6 +60,7 @@ export interface AgentDeps {
   saveProfile: (next: ProgramProfile) => Promise<void>;
   setStatus: (id: number, next: CandidateStatus, feedback?: SkipFeedback) => Promise<boolean>;
   addCandidates: (items: NewCandidate[]) => Promise<number>;
+  reloadCandidates: () => Promise<void>;
   setWorking: (label: string | null) => void;
   onCandidatesDiscovered?: () => void;
 }
@@ -1672,8 +1673,10 @@ export async function runStartupMaintenance(deps: AgentDeps): Promise<string[]> 
     if (!deps.candidates.length && !deps.intake.discoveryRanAt) {
       const result = await discoverCandidates({}, deps);
       const stamped: IntakeData = { ...deps.intake, discoveryRanAt: new Date().toISOString() };
-      await deps.saveIntake(stamped);
       deps.intake = stamped;
+      // Persisting the discovery marker and refreshing the newly inserted
+      // candidates are independent, so neither request should block the other.
+      await Promise.all([deps.saveIntake(stamped), deps.reloadCandidates()]);
       if (result.added > 0) {
         deps.onCandidatesDiscovered?.();
         lines.push(`Added ${result.added} recommended candidate${result.added === 1 ? '' : 's'} from Scout's opted-in students`);

@@ -265,6 +265,13 @@ export async function fetchOptedInScoutStudents(): Promise<SourcedStudent[]> {
       headline: s(profile.headline, 160),
       location: s(profile.location, 120),
       citizenship: distillCitizenship(s(intake?.answers?.citizenship, 160)),
+      citizenshipCountries: Array.isArray(intake?.citizenshipCountries) ? intake.citizenshipCountries : [],
+      programmeInterests: Array.isArray(intake?.programmeInterests) ? intake.programmeInterests : [],
+      apprenticeshipOptIn: intake?.apprenticeshipOptIn === true,
+      apprenticeshipEligibleCountries: Array.isArray(intake?.apprenticeshipEligibleCountries)
+        ? intake.apprenticeshipEligibleCountries
+        : [],
+      internationalOnly: intake?.internationalOnly === true,
       level: sniffSeekingLevel(intake, education),
       gpaContext: context,
       education: education.slice(0, 6).map((e: any) => ({
@@ -287,7 +294,9 @@ export async function fetchOptedInScoutStudents(): Promise<SourcedStudent[]> {
       extracurriculars: (Array.isArray(profile.extracurriculars) ? profile.extracurriculars : [])
         .slice(0, 8)
         .map((e: any) => ({ title: s(e?.title, 120), description: s(e?.description, 300) })),
-      lookingFor: s(profile.lookingFor, 600),
+      // Preserve Scout's complete eight-part profile summary for Alma instead
+      // of truncating away later constraints such as visa or language needs.
+      lookingFor: s(profile.lookingFor, 1400),
       // Test scores come from the stated answer, with the parsed resume text
       // filling in scores the student deferred to it ("check my resume").
       tests: distillTests(s(intake?.answers?.tests, 300), String(profile.resumeText || '').slice(0, 15000)),

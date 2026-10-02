@@ -23,7 +23,7 @@ import {
 import { cn, tw, typography } from '../../lib/colors';
 import { regenerateItemSummary } from './scout-agent';
 import { useScout } from './scout-store';
-import { ProfileData, getInitials } from './scout-types';
+import { ProfileData, getInitials, toTitleCaseName } from './scout-types';
 
 type SummarySection = 'education' | 'work' | 'research' | 'extracurriculars';
 
@@ -195,12 +195,13 @@ function EditActions({ onSave, onCancel, saving }: { onSave: () => void; onCance
 }
 
 export default function ScoutProfile() {
-  const { profile, saveProfile, email } = useScout();
+  const { profile, saveProfile, commitProfileItemSummary, email } = useScout();
   const [editing, setEditing] = useState<string | null>(null); // e.g. "header" | "education-0" | "work-new"
   const [form, setForm] = useState<any>({});
   const [saving, setSaving] = useState(false);
   const [refreshingKey, setRefreshingKey] = useState<string | null>(null);
   const [skillDraft, setSkillDraft] = useState('');
+  const displayProfileName = toTitleCaseName(profile.name || email.split('@')[0]);
 
   const startEdit = (key: string, initial: any) => {
     setEditing(key);
@@ -212,6 +213,99 @@ export default function ScoutProfile() {
     setForm({});
   };
 
+  // The visibility control also persists the profile and closes the active
+  // editor. Fold that editor's live form values into the save first so the
+  // toggle cannot discard an entry the student is still composing.
+  const mergePendingEdit = (base: ProfileData): ProfileData => {
+    if (!editing) return base;
+
+    if (editing === 'header') {
+      return {
+        ...base,
+        name: form.name || '',
+        headline: form.headline || '',
+        location: form.location || '',
+      };
+    }
+
+    if (editing === 'education-new') {
+      return { ...base, education: [...base.education, { ...form, aiSummary: '' }] };
+    }
+    if (editing.startsWith('education-')) {
+      const index = Number(editing.slice('education-'.length));
+      if (Number.isInteger(index) && base.education[index]) {
+        return {
+          ...base,
+          education: base.education.map((item, i) => (i === index ? { ...item, ...form } : item)),
+        };
+      }
+    }
+
+    if (editing === 'work-new') {
+      return { ...base, work: [...base.work, { ...form, aiSummary: '' }] };
+    }
+    if (editing.startsWith('work-')) {
+      const index = Number(editing.slice('work-'.length));
+      if (Number.isInteger(index) && base.work[index]) {
+        return {
+          ...base,
+          work: base.work.map((item, i) => (i === index ? { ...item, ...form } : item)),
+        };
+      }
+    }
+
+    if (editing === 'research-new') {
+      return { ...base, research: [...base.research, { ...form, aiSummary: '' }] };
+    }
+    if (editing.startsWith('research-')) {
+      const index = Number(editing.slice('research-'.length));
+      if (Number.isInteger(index) && base.research[index]) {
+        return {
+          ...base,
+          research: base.research.map((item, i) => (i === index ? { ...item, ...form } : item)),
+        };
+      }
+    }
+
+    if (editing === 'extra-new') {
+      return {
+        ...base,
+        extracurriculars: [...base.extracurriculars, { ...form, aiSummary: '' }],
+      };
+    }
+    if (editing.startsWith('extra-')) {
+      const index = Number(editing.slice('extra-'.length));
+      if (Number.isInteger(index) && base.extracurriculars[index]) {
+        return {
+          ...base,
+          extracurriculars: base.extracurriculars.map((item, i) =>
+            i === index ? { ...item, ...form } : item
+          ),
+        };
+      }
+    }
+
+    if (editing === 'misc-new') {
+      return {
+        ...base,
+        misc: [...base.misc, { title: form.title || '', detail: form.detail || '' }],
+      };
+    }
+    if (editing.startsWith('misc-')) {
+      const index = Number(editing.slice('misc-'.length));
+      if (Number.isInteger(index) && base.misc[index]) {
+        return {
+          ...base,
+          misc: base.misc.map((item, i) =>
+            i === index ? { title: form.title || '', detail: form.detail || '' } : item
+          ),
+        };
+      }
+    }
+
+    return base;
+  };
+
   // Persist a profile change, then refresh the relevant Scout summary so it
   // reflects the edit (runs in the background; the UI shows a small indicator).
   const persistWithSummary = async (
@@ -220,7 +314,20 @@ export default function ScoutProfile() {
   ) => {
     setSaving(true);
     try {
-      await saveProfile(next);
+      let prepared = next;
+      if (summaryTarget?.section === 'skills') {
+        prepared = { ...next, skillsSummary: '' };
+      } else if (summaryTarget) {
+        const section = summaryTarget.section;
+        const index = summaryTarget.index ?? 0;
+        prepared = {
+          ...next,
+          [section]: (next[section] as any[]).map((item, itemIndex) =>
+            itemIndex === index ? { ...item, aiSummary: '' } : item
+          ),
+        } as ProfileData;
+      }
+      const { revision } = await saveProfile(prepared);
       setEditing(null);
       setForm({});
       if (summaryTarget) {
@@ -228,17 +335,16 @@ export default function ScoutProfile() {
         setRefreshingKey(key);
         try {
           if (summaryTarget.section === 'skills') {
-            const summary = await regenerateItemSummary('skills', null, next);
-            if (summary) await saveProfile({ ...next, skillsSummary: summary });
+            const summary = await regenerateItemSummary('skills', null, prepared);
+            if (summary) await commitProfileItemSummary(revision, 'skills', null, summary);
           } else {
             const idx = summaryTarget.index ?? 0;
-            const list = next[summaryTarget.section] as any[];
+            const list = prepared[summaryTarget.section] as any[];
             const item = list[idx];
             if (item) {
-              const summary = await regenerateItemSummary(summaryTarget.section, item, next);
+              const summary = await regenerateItemSummary(summaryTarget.section, item, prepared);
               if (summary) {
-                const updatedList = list.map((it, i) => (i === idx ? { ...it, aiSummary: summary } : it));
-                await saveProfile({ ...next, [summaryTarget.section]: updatedList } as ProfileData);
+                await commitProfileItemSummary(revision, summaryTarget.section, idx, summary);
               }
             }
           }
@@ -271,20 +377,25 @@ export default function ScoutProfile() {
   };
 
   const isEmpty =
+    !profile.headline &&
+    !profile.location &&
     !profile.bio &&
     profile.education.length === 0 &&
     profile.work.length === 0 &&
     profile.research.length === 0 &&
     profile.skills.length === 0 &&
-    profile.extracurriculars.length === 0;
+    profile.extracurriculars.length === 0 &&
+    profile.misc.length === 0;
 
   return (
-    <div className="h-full min-h-0 flex flex-col bg-white">
+    <div id="profile" className="h-full min-h-0 flex flex-col bg-white">
       <div className="flex-shrink-0 flex items-center justify-between gap-3 px-5 py-3.5 border-b border-[var(--space-border-default)]">
         <h1 className={`text-lg font-semibold ${typography.color.primary}`}>Profile</h1>
         <button
           type="button"
-          onClick={() => persistWithSummary({ ...profile, visible: !profile.visible })}
+          onClick={() =>
+            persistWithSummary({ ...mergePendingEdit(profile), visible: !profile.visible })
+          }
           className={cn(
             'flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-colors',
             profile.visible
@@ -322,7 +433,7 @@ export default function ScoutProfile() {
           ) : (
             <div className="flex items-start gap-4">
               <div className="min-w-0 flex-1">
-                <h2 className={`text-xl font-semibold ${typography.color.primary}`}>{profile.name || email.split('@')[0]}</h2>
+                <h2 className={`text-xl font-semibold ${typography.color.primary}`}>{displayProfileName}</h2>
                 {profile.headline && <p className={`text-sm mt-1 ${typography.color.secondary}`}>{profile.headline}</p>}
                 <p className={`flex items-center gap-1.5 text-sm mt-3 ${typography.color.muted}`}>
                   <MapPin className="w-4 h-4" />
@@ -331,7 +442,7 @@ export default function ScoutProfile() {
               </div>
               <div className="flex flex-col items-end gap-2">
                 <div className="w-14 h-14 rounded-full bg-[var(--space-brand-primary-900)] text-white flex items-center justify-center text-lg font-semibold">
-                  {getInitials(profile.name || email)}
+                  {getInitials(displayProfileName || email)}
                 </div>
                 <button
                   type="button"
@@ -355,15 +466,26 @@ export default function ScoutProfile() {
         {/* Bio — AI generated, not manually editable */}
         <div className="mt-6">
           <h3 className={`text-sm font-semibold pb-2 border-b border-[var(--space-border-default)] ${typography.color.primary}`}>Bio</h3>
-          <p className={`text-sm mt-3 leading-relaxed ${profile.bio ? typography.color.secondary : typography.color.muted}`}>
-            {profile.bio || 'Scout writes your bio from your experience, academics, skills, research, and extracurriculars once it knows them.'}
-          </p>
+          {profile.bioGeneration?.status === 'pending' ? (
+            <p className={`flex items-center gap-2 text-sm mt-3 ${typography.color.muted}`} role="status" aria-live="polite">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Scout is updating your Bio to reflect the latest Profile changes…
+            </p>
+          ) : profile.bioGeneration?.status === 'failed' ? (
+            <p className={`text-sm mt-3 leading-relaxed ${typography.color.danger}`} role="alert">
+              Scout couldn't refresh your Bio just now. Your Profile changes are saved, and the Bio will retry after the next factual update or resume re-read.
+            </p>
+          ) : (
+            <p className={`text-sm mt-3 leading-relaxed ${profile.bio ? typography.color.secondary : typography.color.muted}`}>
+              {profile.bio || 'Scout writes your bio from your experience, academics, skills, research, and extracurriculars once it knows them.'}
+            </p>
+          )}
         </div>
 
         {/* What you're looking for — AI generated */}
         <div className="mt-6">
           <h3 className={`text-sm font-semibold pb-2 border-b border-[var(--space-border-default)] ${typography.color.primary}`}>
-            What {profile.name ? profile.name.split(' ')[0] : 'you'} {profile.name ? 'is' : 'are'} looking for
+            What {profile.name ? displayProfileName.split(' ')[0] : 'you'} {profile.name ? 'is' : 'are'} looking for
           </h3>
           <p className={`text-sm mt-3 leading-relaxed ${profile.lookingFor ? typography.color.secondary : typography.color.muted}`}>
             {profile.lookingFor || 'This fills in from your conversation with Scout — what you want from your education, and what matters in a program.'}
@@ -415,18 +537,21 @@ export default function ScoutProfile() {
                 <p className={`text-sm font-semibold ${typography.color.primary}`}>{item.institute || 'Institution'}</p>
                 <p className={`text-sm mt-0.5 ${typography.color.secondary}`}>
                   {[item.degree, item.field].filter(Boolean).join(', ')}
-                  {item.inProgress && (
+                  {item.inProgress && !item.endYear && (
                     <span className="ml-2 px-2 py-0.5 rounded-full bg-[var(--space-brand-primary-50)] text-[var(--space-text-brand)] text-[11px] font-medium">
                       In Progress
                     </span>
                   )}
                 </p>
                 <p className={`text-xs mt-1 ${typography.color.muted}`}>
-                  {[item.startYear && `${item.startYear}–${item.inProgress ? 'present' : item.endYear || ''}`, item.grade && `Grade: ${item.grade}`]
+                  {[item.startYear && `${item.startYear} – ${item.inProgress && !item.endYear ? 'present' : item.endYear || ''}`, item.grade && `Grade: ${item.grade}`]
                     .filter(Boolean)
                     .join(' · ')}
                 </p>
-                <ScoutSummary text={item.aiSummary} refreshing={refreshingKey === `education-${i}`} />
+                <ScoutSummary
+                  text={item.inProgress && item.endYear ? '' : item.aiSummary}
+                  refreshing={refreshingKey === `education-${i}`}
+                />
               </ItemCard>
             )
           )}

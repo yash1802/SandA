@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import { cn, tw, typography } from '../../lib/colors';
 import { AgentDeps, discoverCandidates } from './alma-agent';
-import { distillCitizenship, distillTests } from './alma-scout-bridge';
+import { SourcedStudent, distillCitizenship, distillTests, fetchOptedInScoutStudents } from './alma-scout-bridge';
 import { useAlma } from './alma-store';
 import {
   CandidateRow,
@@ -541,12 +541,14 @@ function CandidateCard({
   onSkip,
   onShortlist,
   busy,
+  readOnly = false,
 }: {
   candidate: CandidateRow;
   onOpen: () => void;
   onSkip: () => void;
   onShortlist: () => void;
   busy: boolean;
+  readOnly?: boolean;
 }) {
   const student = asObj<StudentSnapshot | null>(candidate.student_json as any, null);
   const name = candidate.name || candidate.student_email || 'Candidate';
@@ -589,7 +591,7 @@ function CandidateCard({
         </p>
       )}
 
-      <div className="mt-3 flex items-center justify-end gap-1.5">
+      {!readOnly && <div className="mt-3 flex items-center justify-end gap-1.5">
         <button
           type="button"
           onClick={(e) => {
@@ -621,6 +623,30 @@ function CandidateCard({
         >
           {busy ? 'Saving…' : 'Shortlist'}
         </button>
+      </div>}
+    </div>
+  );
+}
+
+function ApprenticeshipProfileModal({ candidate, onClose }: { candidate: CandidateRow; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-[65] flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/45" onClick={onClose} />
+      <div className="relative w-full max-w-2xl max-h-[88vh] overflow-y-auto rounded-2xl bg-[var(--space-surface-page)] p-6 shadow-2xl">
+        <button
+          type="button"
+          onClick={onClose}
+          className="absolute right-4 top-4 w-9 h-9 rounded-full bg-white border border-[var(--space-border-default)] flex items-center justify-center"
+          aria-label="Close"
+        >
+          <X className="w-4 h-4" />
+        </button>
+        <div className="pr-10">
+          <div className="mb-4 inline-flex rounded-full border border-[var(--space-brand-primary-200)] bg-[var(--space-brand-primary-50)] px-3 py-1 text-xs font-semibold text-[var(--space-text-brand)]">
+            Apprenticeship-ready student
+          </div>
+          <CandidateDetailBody candidate={candidate} />
+        </div>
       </div>
     </div>
   );
@@ -631,8 +657,13 @@ function CandidateCard({
 
 export default function AlmaRecommendations() {
   const store = useAlma();
-  const { recommended, skippedList, candidates, activeProgram, setStatus, appendLocalMessage, persistMessage } = store;
+  const { recommended, skippedList, candidates, activeProgram, setStatus, appendLocalMessage, persistMessage, trackActivity } = store;
   const [view, setView] = useState<ViewKey>('recommendations');
+  const [showApprenticeships, setShowApprenticeships] = useState(false);
+  const [apprenticeshipStudents, setApprenticeshipStudents] = useState<SourcedStudent[]>([]);
+  const [apprenticeshipLoading, setApprenticeshipLoading] = useState(true);
+  const [eligibleCountry, setEligibleCountry] = useState('all');
+  const [apprenticeshipModal, setApprenticeshipModal] = useState<CandidateRow | null>(null);
   const [query, setQuery] = useState('');
   const [carousel, setCarousel] = useState<{ view: ViewKey; startId: number } | null>(null);
   const [skipTarget, setSkipTarget] = useState<CandidateRow | null>(null);
@@ -640,7 +671,64 @@ export default function AlmaRecommendations() {
   const [searching, setSearching] = useState(false);
   const [searchNote, setSearchNote] = useState('');
 
-  const list = view === 'recommendations' ? recommended : skippedList;
+  useEffect(() => {
+    let cancelled = false;
+    setApprenticeshipLoading(true);
+    fetchOptedInScoutStudents()
+      .then((students) => {
+        if (!cancelled) setApprenticeshipStudents(students.filter((student) => student.snapshot.apprenticeshipOptIn));
+      })
+      .finally(() => {
+        if (!cancelled) setApprenticeshipLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const eligibleCountries = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const student of apprenticeshipStudents) {
+      for (const entry of student.snapshot.citizenshipCountries || []) {
+        if (entry.status !== 'neither') map.set(entry.country_code, entry.country_name);
+      }
+    }
+    return [...map.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  }, [apprenticeshipStudents]);
+
+  const apprenticeshipCandidates = useMemo<CandidateRow[]>(
+    () =>
+      apprenticeshipStudents
+        .filter(
+          (student) =>
+            eligibleCountry === 'all' ||
+            (student.snapshot.apprenticeshipEligibleCountries || []).includes(eligibleCountry)
+        )
+        .map((student, index) => ({
+          id: -(index + 1),
+          user_email: '',
+          program_id: activeProgram?.id || 0,
+          student_email: student.snapshot.email,
+          name: student.snapshot.name,
+          target_major: student.targetMajor,
+          gpa: student.gpa,
+          match_score: null,
+          fit_reasons: [
+            {
+              title: 'Apprenticeship eligibility',
+              detail: `Citizenship or permanent residency recorded for ${(student.snapshot.citizenshipCountries || [])
+                .filter((entry) => entry.status !== 'neither')
+                .map((entry) => entry.country_name)
+                .join(', ') || 'a local market'}.`,
+            },
+          ],
+          student_json: student.snapshot,
+          status: 'recommended',
+        })),
+    [apprenticeshipStudents, eligibleCountry, activeProgram?.id]
+  );
+
+  const list = showApprenticeships ? apprenticeshipCandidates : view === 'recommendations' ? recommended : skippedList;
   const carouselPool = carousel ? (carousel.view === 'recommendations' ? recommended : skippedList) : [];
 
   const filtered = useMemo(() => {
@@ -733,10 +821,13 @@ export default function AlmaRecommendations() {
               <button
                 key={key}
                 type="button"
-                onClick={() => setView(key)}
+                onClick={() => {
+                  setShowApprenticeships(false);
+                  setView(key);
+                }}
                 className={cn(
                   'px-3 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap',
-                  view === key
+                  !showApprenticeships && view === key
                     ? 'bg-white shadow-sm text-[var(--space-text-primary)] ring-1 ring-[var(--space-border-default)]'
                     : 'text-[var(--space-text-muted)] hover:text-[var(--space-text-secondary)]'
                 )}
@@ -746,8 +837,33 @@ export default function AlmaRecommendations() {
                   : `Skipped${skippedList.length ? ` · ${skippedList.length}` : ''}`}
               </button>
             ))}
+            <button
+              type="button"
+              onClick={() => setShowApprenticeships(true)}
+              className={cn(
+                'px-3 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap',
+                showApprenticeships
+                  ? 'bg-white shadow-sm text-[var(--space-text-primary)] ring-1 ring-[var(--space-border-default)]'
+                  : 'text-[var(--space-text-muted)] hover:text-[var(--space-text-secondary)]'
+              )}
+            >
+              Apprenticeship-ready{apprenticeshipStudents.length ? ` · ${apprenticeshipStudents.length}` : ''}
+            </button>
           </div>
-          {searchNote && <p className={`text-xs truncate ${typography.color.muted}`}>{searchNote}</p>}
+          {showApprenticeships && eligibleCountries.length > 0 && (
+            <select
+              value={eligibleCountry}
+              onChange={(event) => setEligibleCountry(event.target.value)}
+              className="h-8 max-w-[180px] rounded-lg border border-[var(--space-border-default)] bg-white px-2 text-xs text-[var(--space-text-primary)]"
+              aria-label="Filter apprenticeship-ready students by eligible country"
+            >
+              <option value="all">All eligible countries</option>
+              {eligibleCountries.map(([code, name]) => (
+                <option key={code} value={code}>{name}</option>
+              ))}
+            </select>
+          )}
+          {searchNote && !showApprenticeships && <p className={`text-xs truncate ${typography.color.muted}`}>{searchNote}</p>}
         </div>
       </div>
 
@@ -755,8 +871,19 @@ export default function AlmaRecommendations() {
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 bg-[var(--space-surface-page)]/40">
         {filtered.length === 0 ? (
           <div className="flex flex-col items-center justify-center text-center py-20 px-6">
-            <Inbox className={cn('w-10 h-10 mb-3', tw.icon.muted)} />
-            {query.trim() ? (
+            {showApprenticeships && apprenticeshipLoading ? <Loader2 className="w-10 h-10 mb-3 animate-spin text-[var(--space-text-muted)]" /> : <Inbox className={cn('w-10 h-10 mb-3', tw.icon.muted)} />}
+            {showApprenticeships ? (
+              <>
+                <p className={`font-medium ${typography.color.primary}`}>
+                  {apprenticeshipLoading ? 'Loading apprenticeship-ready students…' : 'No apprenticeship-ready students yet'}
+                </p>
+                {!apprenticeshipLoading && (
+                  <p className={`text-sm mt-1 max-w-sm ${typography.color.secondary}`}>
+                    This segment fills as Scout students opt into apprenticeships and record citizenship or permanent residency.
+                  </p>
+                )}
+              </>
+            ) : query.trim() ? (
               <>
                 <p className={`font-medium ${typography.color.primary}`}>No matches</p>
                 <p className={`text-sm mt-1 max-w-xs ${typography.color.secondary}`}>No candidates match "{query.trim()}".</p>
@@ -793,7 +920,16 @@ export default function AlmaRecommendations() {
                 key={c.id}
                 candidate={c}
                 busy={busyId === c.id}
-                onOpen={() => setCarousel({ view, startId: c.id })}
+                readOnly={showApprenticeships}
+                onOpen={() => {
+                  trackActivity('profile_view', {
+                    studentId: c.student_email || null,
+                    candidateId: c.id > 0 ? c.id : null,
+                    metadata: { segment: showApprenticeships ? 'apprenticeship_ready' : view, eligible_country: eligibleCountry },
+                  }).catch(() => undefined);
+                  if (showApprenticeships) setApprenticeshipModal(c);
+                  else setCarousel({ view, startId: c.id });
+                }}
                 onSkip={() => setSkipTarget(c)}
                 onShortlist={() => shortlist(c)}
               />
@@ -803,6 +939,9 @@ export default function AlmaRecommendations() {
       </div>
 
       {carousel && <CandidateCarousel pool={carouselPool} startId={carousel.startId} onClose={() => setCarousel(null)} />}
+      {apprenticeshipModal && (
+        <ApprenticeshipProfileModal candidate={apprenticeshipModal} onClose={() => setApprenticeshipModal(null)} />
+      )}
       {skipTarget && (
         <SkipFeedbackModal
           candidate={skipTarget}

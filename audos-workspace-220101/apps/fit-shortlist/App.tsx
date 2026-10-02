@@ -3,21 +3,154 @@
 // (Recommendations / Shortlist / Documents / Profile), with the right panel
 // persistent and width-adjustable.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { FileText, GraduationCap, Inbox, Landmark, Loader2, LogOut, Mail, MapPin, MessageCircle, Star, User } from 'lucide-react';
 import { cn, typography } from '../../lib/colors';
 import { logoutUser } from '../../components/AppProfileMenu';
 import { useSpaceRuntime } from '../../SpaceRuntimeContext';
 import ScoutChat from './scout-chat';
-import ScoutDocuments from './scout-documents';
 import ScoutNav from './scout-nav';
-import ScoutProfile from './scout-profile';
-import ScoutRecommendations from './scout-recommendations';
-import ScoutShortlist from './scout-shortlist';
-import { ScoutContext, ScoutContextValue, useScout, useScoutStore } from './scout-store';
+import { generateProfileBio, profileSummaryFailureCode } from './scout-agent';
+import { ScoutContext, ScoutContextValue, ScoutStore, useScout, useScoutStore } from './scout-store';
 import { InvitationRow, TabId, getInitials, relativeStamp, tileColor } from './scout-types';
 
+// Secondary panels are intentionally split out of Scout's entry chunk. Mobile
+// visitors start in chat and should not parse every panel before first input;
+// desktop only fetches the default Recommendations panel during initial render.
+const ScoutDocuments = lazy(() => import('./scout-documents'));
+const ScoutProfile = lazy(() => import('./scout-profile'));
+const ScoutRecommendations = lazy(() => import('./scout-recommendations'));
+const ScoutShortlist = lazy(() => import('./scout-shortlist'));
+
 const RIGHT_FRACTION_KEY = 'scout_right_fraction';
+const SCOUT_UTM_STORAGE_KEY = 'scout_utm_params';
+const SCOUT_LEAD_REGISTERED_KEY = 'scout_lead_registered';
+const SCOUT_UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'] as const;
+type ScoutUtmKey = (typeof SCOUT_UTM_KEYS)[number];
+type ScoutUtmParams = Record<ScoutUtmKey, string | null>;
+const scoutLeadRegistrationsInFlight = new Set<string>();
+const APP_ROOT_HASH = '#fit-shortlist';
+const TAB_HASHES: Record<TabId, string> = {
+  recommendations: '#recommendations',
+  invitations: '#invitations',
+  shortlist: '#shortlist',
+  documents: '#documents',
+  profile: '#profile',
+};
+
+function tabFromHash(hash: string): TabId | null {
+  const match = (Object.entries(TAB_HASHES) as [TabId, string][]).find(([, tabHash]) => tabHash === hash);
+  return match?.[0] ?? null;
+}
+
+function pushHash(hash: string) {
+  if (typeof window !== 'undefined' && window.location.hash !== hash) {
+    window.history.pushState(null, '', hash);
+  }
+}
+
+function scoutUtmParamsFromUrl(): ScoutUtmParams {
+  const search = new URLSearchParams(window.location.search);
+  const params = {} as ScoutUtmParams;
+  for (const key of SCOUT_UTM_KEYS) params[key] = search.get(key);
+  return params;
+}
+
+function captureScoutUtmParams(): ScoutUtmParams {
+  const current = scoutUtmParamsFromUrl();
+  try {
+    const stored = sessionStorage.getItem(SCOUT_UTM_STORAGE_KEY);
+    if (stored !== null) {
+      const parsed = JSON.parse(stored) as Partial<ScoutUtmParams>;
+      const params = {} as ScoutUtmParams;
+      for (const key of SCOUT_UTM_KEYS) params[key] = typeof parsed?.[key] === 'string' ? parsed[key]! : null;
+      return params;
+    }
+    sessionStorage.setItem(SCOUT_UTM_STORAGE_KEY, JSON.stringify(current));
+  } catch {
+    // Storage can be unavailable in privacy-restricted browser contexts.
+  }
+  return current;
+}
+
+async function registerScoutLead(email: string): Promise<void> {
+  const normalizedEmail = email.trim().toLowerCase();
+  if (!normalizedEmail || normalizedEmail === 'preview@scout.local') return;
+
+  try {
+    if (sessionStorage.getItem(SCOUT_LEAD_REGISTERED_KEY) !== null) return;
+  } catch {
+    // Continue without persistence when sessionStorage is unavailable.
+  }
+  if (scoutLeadRegistrationsInFlight.has(normalizedEmail)) return;
+
+  scoutLeadRegistrationsInFlight.add(normalizedEmail);
+  try {
+    const utm = captureScoutUtmParams();
+    const response = await fetch('/api/workspaces/bce7db44-7049-40fa-80a1-1dacb4302c83/contacts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Workspace-DB-Token': (window as any).__workspaceDb?.token || '',
+      },
+      body: JSON.stringify({ email: normalizedEmail, source: 'chatgpt_ads', ...utm }),
+    });
+
+    if (response.ok || response.status === 409) {
+      try {
+        sessionStorage.setItem(SCOUT_LEAD_REGISTERED_KEY, 'true');
+      } catch {
+        // The contact is registered even if the browser cannot persist the flag.
+      }
+      return;
+    }
+
+    console.warn('[Scout] Contact registration failed', response.status);
+  } catch (error) {
+    console.warn('[Scout] Contact registration failed', error);
+  } finally {
+    scoutLeadRegistrationsInFlight.delete(normalizedEmail);
+  }
+}
+
+function useBioGenerationCoordinator(store: ScoutStore) {
+  const revision = store.profile.bioGeneration?.revision;
+  const status = store.profile.bioGeneration?.status;
+
+  useEffect(() => {
+    if (!store.ready || !revision || status !== 'pending') return;
+    let cancelled = false;
+    const profile = store.profile;
+    const intake = store.intake;
+    const timer = window.setTimeout(async () => {
+      let lastError: unknown = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const bio = await generateProfileBio(profile, intake);
+          if (!cancelled) await store.commitGeneratedBio(revision, bio);
+          return;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (cancelled) return;
+      const errorCode = profileSummaryFailureCode(lastError);
+      console.error('[Scout Bio] generation failed', { revision, errorCode });
+      await store.failGeneratedBio(revision, errorCode);
+    }, 900);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    store.ready,
+    revision,
+    status,
+    store.commitGeneratedBio,
+    store.failGeneratedBio,
+  ]);
+}
 
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 900);
@@ -181,19 +314,34 @@ function ScoutInvitations() {
   );
 }
 
+function PanelLoading() {
+  return (
+    <div className="h-full min-h-0 flex items-center justify-center bg-white">
+      <span className={`flex items-center gap-2 text-sm ${typography.color.secondary}`}>
+        <Loader2 className="w-4 h-4 animate-spin" />
+        Loading section…
+      </span>
+    </div>
+  );
+}
+
 function RightPanel({ tab }: { tab: TabId }) {
-  switch (tab) {
-    case 'shortlist':
-      return <ScoutShortlist />;
-    case 'documents':
-      return <ScoutDocuments />;
-    case 'profile':
-      return <ScoutProfile />;
-    case 'invitations':
-      return <ScoutInvitations />;
-    default:
-      return <ScoutRecommendations />;
-  }
+  if (tab === 'invitations') return <ScoutInvitations />;
+
+  const panel = (() => {
+    switch (tab) {
+      case 'shortlist':
+        return <ScoutShortlist />;
+      case 'documents':
+        return <ScoutDocuments />;
+      case 'profile':
+        return <ScoutProfile />;
+      default:
+        return <ScoutRecommendations />;
+    }
+  })();
+
+  return <Suspense fallback={<PanelLoading />}>{panel}</Suspense>;
 }
 
 // On mobile there is no nav column, so the brand + user component (Sign Out)
@@ -265,23 +413,38 @@ const SCOUT_SOURCE_VERSION = 'scout-invitations-inline-2026-07-28-r2';
 
 export default function ScoutApp(_props: { appConfig?: unknown; dataFile?: string }) {
   const store = useScoutStore();
+  useBioGenerationCoordinator(store);
   const { spaceId, setSessionId } = useSpaceRuntime();
   const isMobile = useIsMobile();
 
-  // "Recommendations" is the default view upon login (PRD).
-  const [activeTab, setActiveTabRaw] = useState<TabId>('recommendations');
-  const [mobileView, setMobileView] = useState<'chat' | TabId>('chat');
+  // "Recommendations" is the default view upon login (PRD), unless the URL deep-links to a section.
+  const [activeTab, setActiveTabRaw] = useState<TabId>(() =>
+    typeof window === 'undefined' ? 'recommendations' : tabFromHash(window.location.hash) ?? 'recommendations'
+  );
+  const [mobileView, setMobileView] = useState<'chat' | TabId>(() =>
+    typeof window === 'undefined' ? 'chat' : tabFromHash(window.location.hash) ?? 'chat'
+  );
   const [navCollapsed, setNavCollapsed] = useState(false);
   const [modalProgramId, setModalProgramId] = useState<number | null>(null);
   const [rightFraction, setRightFraction] = useState(loadRightFraction);
 
+  useEffect(() => {
+    captureScoutUtmParams();
+  }, []);
+
+  useEffect(() => {
+    if (!store.ready) return;
+    void registerScoutLead(store.email);
+  }, [store.ready, store.email]);
+
   const layoutRef = useRef<HTMLDivElement>(null);
-  const resizing = useRef<{ startX: number; startFraction: number } | null>(null);
+  const resizing = useRef<{ startX: number; startFraction: number; containerWidth: number } | null>(null);
 
   const setActiveTab = useCallback(
     (tab: TabId) => {
       setActiveTabRaw(tab);
       if (isMobile) setMobileView(tab);
+      pushHash(TAB_HASHES[tab]);
     },
     [isMobile]
   );
@@ -292,9 +455,32 @@ export default function ScoutApp(_props: { appConfig?: unknown; dataFile?: strin
       setActiveTabRaw('shortlist');
       if (isMobile) setMobileView('shortlist');
       setModalProgramId(id);
+      pushHash(TAB_HASHES.shortlist);
     },
     [isMobile]
   );
+
+  useEffect(() => {
+    const syncViewFromHash = () => {
+      const tab = tabFromHash(window.location.hash);
+      if (tab) {
+        setActiveTabRaw(tab);
+        if (isMobile) setMobileView(tab);
+        setModalProgramId(null);
+      } else if (window.location.hash === APP_ROOT_HASH) {
+        setActiveTabRaw('recommendations');
+        if (isMobile) setMobileView('chat');
+        setModalProgramId(null);
+      }
+    };
+
+    window.addEventListener('popstate', syncViewFromHash);
+    window.addEventListener('hashchange', syncViewFromHash);
+    return () => {
+      window.removeEventListener('popstate', syncViewFromHash);
+      window.removeEventListener('hashchange', syncViewFromHash);
+    };
+  }, [isMobile]);
 
   const signOut = useCallback(() => {
     logoutUser(spaceId, setSessionId);
@@ -302,26 +488,44 @@ export default function ScoutApp(_props: { appConfig?: unknown; dataFile?: strin
 
   const onDividerDown = (e: React.MouseEvent) => {
     e.preventDefault();
-    resizing.current = { startX: e.clientX, startFraction: rightFraction };
-    const onMove = (ev: MouseEvent) => {
-      const ctx = resizing.current;
-      const container = layoutRef.current;
-      if (!ctx || !container) return;
-      const total = container.getBoundingClientRect().width || 1;
-      // Dragging left grows the right panel.
-      const next = Math.min(0.62, Math.max(0.28, ctx.startFraction + (ctx.startX - ev.clientX) / total));
-      setRightFraction(next);
+    const container = layoutRef.current;
+    if (!container) return;
+
+    // Measure once before any resize writes. Reading the container on every
+    // mousemove after React changed the panel width forced a synchronous layout.
+    resizing.current = {
+      startX: e.clientX,
+      startFraction: rightFraction,
+      containerWidth: container.getBoundingClientRect().width || 1,
     };
-    const onUp = () => {
-      resizing.current = null;
-      setRightFraction((current) => {
+
+    let pendingClientX = e.clientX;
+    let animationFrame: number | null = null;
+    const fractionAt = (clientX: number, ctx: NonNullable<typeof resizing.current>) =>
+      Math.min(0.62, Math.max(0.28, ctx.startFraction + (ctx.startX - clientX) / ctx.containerWidth));
+
+    const onMove = (ev: MouseEvent) => {
+      pendingClientX = ev.clientX;
+      if (animationFrame !== null) return;
+      animationFrame = requestAnimationFrame(() => {
+        animationFrame = null;
+        const ctx = resizing.current;
+        if (ctx) setRightFraction(fractionAt(pendingClientX, ctx));
+      });
+    };
+    const onUp = (ev: MouseEvent) => {
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+      const ctx = resizing.current;
+      if (ctx) {
+        const finalFraction = fractionAt(ev.clientX, ctx);
+        setRightFraction(finalFraction);
         try {
-          localStorage.setItem(RIGHT_FRACTION_KEY, String(current));
+          localStorage.setItem(RIGHT_FRACTION_KEY, String(finalFraction));
         } catch {
           // widths just won't persist
         }
-        return current;
-      });
+      }
+      resizing.current = null;
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       document.body.style.cursor = '';
@@ -388,8 +592,12 @@ export default function ScoutApp(_props: { appConfig?: unknown; dataFile?: strin
                   key={tab.id}
                   type="button"
                   onClick={() => {
-                    setMobileView(tab.id);
-                    if (tab.id !== 'chat') setActiveTabRaw(tab.id);
+                    if (tab.id === 'chat') {
+                      setMobileView('chat');
+                      pushHash(APP_ROOT_HASH);
+                    } else {
+                      setActiveTab(tab.id);
+                    }
                   }}
                   className={cn(
                     'flex-1 flex flex-col items-center gap-1 py-2.5 text-[11px] font-medium transition-colors',

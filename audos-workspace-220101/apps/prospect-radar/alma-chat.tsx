@@ -12,9 +12,9 @@ import {
   Send,
   X,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import type { Components } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import ReactMarkdown from 'https://esm.sh/react-markdown@9.0.1?external=react';
+import type { Components } from 'https://esm.sh/react-markdown@9.0.1?external=react';
+import remarkGfm from 'https://esm.sh/remark-gfm@4.0.0';
 import { cn, typography } from '../../lib/colors';
 import { AgentDeps, parseBrochurePdf, runAgentTurn, runStartupMaintenance } from './alma-agent';
 import { uploadFile, useAlma } from './alma-store';
@@ -221,7 +221,6 @@ export default function AlmaChat() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const greeted = useRef(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const buildDeps = useCallback(
     (workingSetter: (label: string | null) => void): AgentDeps => ({
@@ -295,8 +294,6 @@ export default function AlmaChat() {
         }
       } catch {
         // maintenance is best-effort
-      } finally {
-        reloadCandidates().catch(() => undefined);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -431,13 +428,6 @@ export default function AlmaChat() {
     return groups;
   }, [messages]);
 
-  const autoGrow = () => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
-  };
-
   return (
     <div className="h-full min-h-0 flex flex-col bg-[var(--space-surface-page)]/60 relative">
       {/* Header — program name + status chip (Jill's "Founding Designer · Hiring") */}
@@ -556,13 +546,9 @@ export default function AlmaChat() {
               <Plus className="w-[18px] h-[18px]" />
             </button>
             <textarea
-              ref={textareaRef}
               value={draft}
               rows={1}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                autoGrow();
-              }}
+              onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
@@ -570,7 +556,7 @@ export default function AlmaChat() {
                 }
               }}
               placeholder="Ask Alma anything…"
-              className="flex-1 resize-none bg-transparent outline-none text-[15px] leading-6 py-1.5 max-h-[140px] text-[var(--space-text-primary)] placeholder:text-[var(--space-text-muted)]"
+              className="flex-1 resize-none [field-sizing:content] bg-transparent outline-none text-[15px] leading-6 py-1.5 max-h-[140px] overflow-y-auto text-[var(--space-text-primary)] placeholder:text-[var(--space-text-muted)]"
             />
             <button
               type="button"

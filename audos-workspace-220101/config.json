@@ -44,6 +44,26 @@
       "name": "Research Surveys",
       "icon": "BarChart",
       "component": "apps/survey-dashboard/App.tsx"
+    },
+    {
+      "id": "student-analytics",
+      "name": "Student Analytics",
+      "description": "Owner-only comprehensive Scout data and programme analytics",
+      "icon": "BarChart",
+      "component": "apps/student-analytics/App.tsx",
+      "allowedRoles": [
+        "owner"
+      ]
+    },
+    {
+      "id": "alma-data-panel",
+      "name": "Alma Data Panel",
+      "description": "Owner-only Alma organization and student interaction analytics",
+      "icon": "Database",
+      "component": "apps/alma-data-panel/App.tsx",
+      "allowedRoles": [
+        "owner"
+      ]
     }
   ],
   "terminology": {
@@ -125,9 +145,9 @@
         }
       },
       "typography": {
-        "headingFont": "Space Grotesk",
-        "bodyFont": "Space Grotesk",
-        "fontFamily": "\"Space Grotesk\", system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif"
+        "headingFont": "Chakra Petch",
+        "bodyFont": "Chakra Petch",
+        "fontFamily": "\"Chakra Petch\", system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif"
       },
       "shell": {
         "accentColor": "#e32626",
@@ -141,6 +161,8 @@
         "--space-brand-primary": "#31a1b4",
         "--space-brand-highlight": "#e32626",
         "--space-brand-contrast": "#07bb8e",
+        "--space-brand-secondary": "#e32626",
+        "--space-brand-accent": "#07bb8e",
         "--space-brand-primary-50": "#eff7f9",
         "--space-brand-primary-100": "#def0f3",
         "--space-brand-primary-200": "#c5e5ea",
@@ -167,8 +189,10 @@
         "--space-surface-muted": "#fbfdfe",
         "--space-surface-accent-soft": "#fce9e9",
         "--space-border-default": "#d2eaef",
+        "--space-border-subtle": "#d2eaef",
         "--space-border-strong": "#b9dfe6",
         "--space-text-primary": "#0e2d32",
+        "--space-text": "#0e2d32",
         "--space-text-secondary": "#1a5761",
         "--space-text-brand": "#0e2d32",
         "--space-text-accent": "#400b0b",
@@ -177,8 +201,35 @@
         "--space-text-on-highlight": "#ffffff",
         "--space-text-on-contrast": "#111827",
         "--space-semantic-success": "#16a34a",
+        "--space-semantic-success-50": "#ecf8f1",
+        "--space-semantic-success-100": "#daf0e2",
+        "--space-semantic-success-500": "#149644",
+        "--space-semantic-success-600": "#16a34a",
+        "--space-semantic-success-700": "#12893e",
         "--space-semantic-warning": "#d97706",
+        "--space-semantic-warning-50": "#fcf4eb",
+        "--space-semantic-warning-100": "#f9e9d7",
+        "--space-semantic-warning-500": "#c86d06",
+        "--space-semantic-warning-600": "#d97706",
+        "--space-semantic-warning-700": "#b66405",
         "--space-semantic-danger": "#dc2626",
+        "--space-semantic-danger-50": "#fceeee",
+        "--space-semantic-danger-100": "#f9dcdc",
+        "--space-semantic-danger-500": "#ca2323",
+        "--space-semantic-danger-600": "#dc2626",
+        "--space-semantic-danger-700": "#b92020",
+        "--space-neutral-0": "#ffffff",
+        "--space-neutral-50": "#f6f9fa",
+        "--space-neutral-100": "#edf4f5",
+        "--space-neutral-200": "#dce8ea",
+        "--space-neutral-300": "#bdd4d8",
+        "--space-neutral-400": "#7aaab2",
+        "--space-neutral-500": "#22717e",
+        "--space-neutral-600": "#1b5a65",
+        "--space-neutral-700": "#164851",
+        "--space-neutral-800": "#0f3339",
+        "--space-neutral-900": "#0a2226",
+        "--space-neutral-950": "#061417",
         "--space-shell-button-text": "#111827",
         "--space-shell-accent-button-text": "#ffffff",
         "--space-shell-dock-text": "#111827",
@@ -195,9 +246,9 @@
     "branding": {
       "name": "Scout & Alma",
       "tagline": "Talk to Scout. Recruit with Alma. Match for life.",
-      "logoUrl": "https://storage.googleapis.com/audos-images/brand-logos/770c41cc-8152-454b-a962-31f3575efe68.png",
-      "headingFont": "Space Grotesk",
-      "bodyFont": "Space Grotesk",
+      "logoUrl": "https://storage.googleapis.com/audos-images/chat-attachments/8e8874c3-8ca0-4043-ad99-87e4dd177c41.png",
+      "headingFont": "Chakra Petch",
+      "bodyFont": "Chakra Petch",
       "colors": {
         "primary": "#31a1b4",
         "highlight": "#e32626",
@@ -326,11 +377,6 @@
       }
     }
   },
-  "cdnDependencies": {
-    "remark-gfm": {
-      "version": "4.0.0"
-    }
-  },
   "updatedAt": "2026-06-25T23:45:00.000Z",
   "memberAccess": {
     "roles": [
@@ -341,8 +387,12 @@
       {
         "id": "university",
         "label": "University"
+      },
+      {
+        "id": "company",
+        "label": "Apprenticeship Company"
       }
     ]
   },
-  "iconUrl": "https://storage.googleapis.com/audos-images/brand-logos/770c41cc-8152-454b-a962-31f3575efe68.png"
+  "iconUrl": "https://storage.googleapis.com/audos-images/chat-attachments/8e8874c3-8ca0-4043-ad99-87e4dd177c41.png"
 }

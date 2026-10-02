@@ -28,9 +28,9 @@ import {
   File,
   XCircle,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import type { Components } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import ReactMarkdown from 'https://esm.sh/react-markdown@9.0.1?external=react';
+import type { Components } from 'https://esm.sh/react-markdown@9.0.1?external=react';
+import remarkGfm from 'https://esm.sh/remark-gfm@4.0.0';
 import { getFriendlyTerm, getToolColor } from '../lib/friendly-terms';
 import { tw } from '../lib/colors';
 import type { AgentChatRuntime } from './useAgentChatRuntime';
@@ -446,7 +446,7 @@ export default function AgentChatView({ runtime }: AgentChatViewProps) {
             ) : (
               <div className="text-center text-gray-500">
                 <Bot className="w-12 h-12 mx-auto mb-3 text-gray-400" />
-                <p className="text-sm">Ask me anything to get started</p>
+                <p className="text-sm">Tell Scout what matters in your university or apprenticeship search, or ask Alma how to reach better-matched students for your institution or company.</p>
               </div>
             )}
           </div>
@@ -641,7 +641,7 @@ export default function AgentChatView({ runtime }: AgentChatViewProps) {
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             placeholder={composerPlaceholder}
-            className="w-full border-0 bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-0 resize-none leading-5"
+            className="w-full border-0 bg-transparent px-3 py-2 text-sm text-gray-900 placeholder:text-gray-600 disabled:text-gray-600 disabled:placeholder:text-gray-600 focus:outline-none focus:ring-0 resize-none leading-5"
             rows={1}
             disabled={loading}
             data-testid="textarea-instruction"
@@ -677,7 +677,7 @@ export default function AgentChatView({ runtime }: AgentChatViewProps) {
           </div>
         </div>
 
-        <p className="text-[10px] text-gray-400 mt-1 text-center leading-tight">
+        <p className="text-[10px] text-gray-600 mt-1 text-center leading-tight">
           {shortcutPrefix}+Enter to send
         </p>
       </div>

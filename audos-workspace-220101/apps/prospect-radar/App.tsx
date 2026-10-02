@@ -6,20 +6,23 @@
 // chat, right dynamic content (Recommendations / Shortlist / Documents /
 // Profile), with the right panel persistent and width-adjustable.
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { FileText, Inbox, Landmark, Loader2, LogOut, MessageCircle, Star, User } from 'lucide-react';
 import { cn, typography } from '../../lib/colors';
 import { logoutUser } from '../../components/AppProfileMenu';
 import { useSpaceRuntime } from '../../SpaceRuntimeContext';
-import AlmaChat from './alma-chat';
-import AlmaDocuments from './alma-documents';
 import AlmaNav, { TAB_DEFS, UniversityAvatar } from './alma-nav';
 import AlmaPrograms from './alma-programs';
-import AlmaProfile from './alma-profile';
-import AlmaRecommendations from './alma-recommendations';
-import AlmaShortlist from './alma-shortlist';
 import { AlmaContext, AlmaContextValue, useAlmaStore } from './alma-store';
 import { TabId } from './alma-types';
+
+// The program dashboard is Alma's landing view. Keep program-only chat and
+// panels out of its entry chunk so they are parsed only after a program opens.
+const AlmaChat = lazy(() => import('./alma-chat'));
+const AlmaDocuments = lazy(() => import('./alma-documents'));
+const AlmaProfile = lazy(() => import('./alma-profile'));
+const AlmaRecommendations = lazy(() => import('./alma-recommendations'));
+const AlmaShortlist = lazy(() => import('./alma-shortlist'));
 
 const RIGHT_FRACTION_KEY = 'alma_right_fraction';
 const PREVIEW_SOURCE_VERSION = 'alma-cache-pruned-2026-07-28-sync-r1';
@@ -46,17 +49,40 @@ function loadRightFraction(): number {
   return 0.46;
 }
 
+function SectionLoading({ label = 'Loading section…' }: { label?: string }) {
+  return (
+    <div className="h-full min-h-0 flex items-center justify-center bg-white">
+      <span className={`flex items-center gap-2 text-sm ${typography.color.secondary}`}>
+        <Loader2 className="w-4 h-4 animate-spin" />
+        {label}
+      </span>
+    </div>
+  );
+}
+
+function AlmaChatPanel() {
+  return (
+    <Suspense fallback={<SectionLoading label="Opening Alma…" />}>
+      <AlmaChat />
+    </Suspense>
+  );
+}
+
 function RightPanel({ tab }: { tab: TabId }) {
-  switch (tab) {
-    case 'shortlist':
-      return <AlmaShortlist />;
-    case 'documents':
-      return <AlmaDocuments />;
-    case 'profile':
-      return <AlmaProfile />;
-    default:
-      return <AlmaRecommendations />;
-  }
+  const panel = (() => {
+    switch (tab) {
+      case 'shortlist':
+        return <AlmaShortlist />;
+      case 'documents':
+        return <AlmaDocuments />;
+      case 'profile':
+        return <AlmaProfile />;
+      default:
+        return <AlmaRecommendations />;
+    }
+  })();
+
+  return <Suspense fallback={<SectionLoading />}>{panel}</Suspense>;
 }
 
 // Jill-style tab row across the top of the right column — mirrors (and stays
@@ -181,7 +207,7 @@ export default function AlmaApp(_props: { appConfig?: unknown; dataFile?: string
   const [newProgramIntent, setNewProgramIntent] = useState(false);
 
   const layoutRef = useRef<HTMLDivElement>(null);
-  const resizing = useRef<{ startX: number; startFraction: number } | null>(null);
+  const resizing = useRef<{ startX: number; startFraction: number; containerWidth: number } | null>(null);
 
   const setActiveTab = useCallback(
     (tab: TabId) => {
@@ -212,26 +238,44 @@ export default function AlmaApp(_props: { appConfig?: unknown; dataFile?: string
 
   const onDividerDown = (e: React.MouseEvent) => {
     e.preventDefault();
-    resizing.current = { startX: e.clientX, startFraction: rightFraction };
-    const onMove = (ev: MouseEvent) => {
-      const ctx = resizing.current;
-      const container = layoutRef.current;
-      if (!ctx || !container) return;
-      const total = container.getBoundingClientRect().width || 1;
-      // Dragging left grows the right panel.
-      const next = Math.min(0.62, Math.max(0.28, ctx.startFraction + (ctx.startX - ev.clientX) / total));
-      setRightFraction(next);
+    const container = layoutRef.current;
+    if (!container) return;
+
+    // Measure once before any resize writes. Reading the container on every
+    // mousemove after React changed the panel width forced a synchronous layout.
+    resizing.current = {
+      startX: e.clientX,
+      startFraction: rightFraction,
+      containerWidth: container.getBoundingClientRect().width || 1,
     };
-    const onUp = () => {
-      resizing.current = null;
-      setRightFraction((current) => {
+
+    let pendingClientX = e.clientX;
+    let animationFrame: number | null = null;
+    const fractionAt = (clientX: number, ctx: NonNullable<typeof resizing.current>) =>
+      Math.min(0.62, Math.max(0.28, ctx.startFraction + (ctx.startX - clientX) / ctx.containerWidth));
+
+    const onMove = (ev: MouseEvent) => {
+      pendingClientX = ev.clientX;
+      if (animationFrame !== null) return;
+      animationFrame = requestAnimationFrame(() => {
+        animationFrame = null;
+        const ctx = resizing.current;
+        if (ctx) setRightFraction(fractionAt(pendingClientX, ctx));
+      });
+    };
+    const onUp = (ev: MouseEvent) => {
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame);
+      const ctx = resizing.current;
+      if (ctx) {
+        const finalFraction = fractionAt(ev.clientX, ctx);
+        setRightFraction(finalFraction);
         try {
-          localStorage.setItem(RIGHT_FRACTION_KEY, String(current));
+          localStorage.setItem(RIGHT_FRACTION_KEY, String(finalFraction));
         } catch {
           // widths just won't persist
         }
-        return current;
-      });
+      }
+      resizing.current = null;
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
       document.body.style.cursor = '';
@@ -312,7 +356,7 @@ export default function AlmaApp(_props: { appConfig?: unknown; dataFile?: string
             onSignOut={signOut}
             onBackToPrograms={() => store.openProgram(null)}
           />
-          <div className="flex-1 min-h-0">{mobileView === 'chat' ? <AlmaChat /> : <RightPanel tab={mobileView} />}</div>
+          <div className="flex-1 min-h-0">{mobileView === 'chat' ? <AlmaChatPanel /> : <RightPanel tab={mobileView} />}</div>
           <div className="flex-shrink-0 flex items-stretch border-t border-[var(--space-border-default)] bg-white safe-bottom">
             {MOBILE_TABS.map((tab) => {
               const Icon = tab.icon;
@@ -361,7 +405,7 @@ export default function AlmaApp(_props: { appConfig?: unknown; dataFile?: string
 
         {/* Middle — agentic AI chat */}
         <div className="flex-1 min-w-0 h-full">
-          <AlmaChat />
+          <AlmaChatPanel />
         </div>
 
         {/* Divider — drag to resize the right panel */}

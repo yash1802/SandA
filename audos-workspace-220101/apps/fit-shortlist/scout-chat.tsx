@@ -12,12 +12,13 @@ import {
   Send,
   X,
 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
-import type { Components } from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import ReactMarkdown from 'https://esm.sh/react-markdown@9.0.1?external=react';
+import type { Components } from 'https://esm.sh/react-markdown@9.0.1?external=react';
+import remarkGfm from 'https://esm.sh/remark-gfm@4.0.0';
 import { cn, typography } from '../../lib/colors';
 import { runAgentTurn, parseResumePdf, runStartupMaintenance, AgentDeps } from './scout-agent';
-import { useScout, uploadPdf } from './scout-store';
+import { discoverEligibleApprenticeships } from './scout-apprenticeships';
+import { isAgentApiError, useScout, uploadPdf } from './scout-store';
 import { MessageAttachment, MessageRow, asArr, dayLabel, nextIntakeQuestion, profileMissingResumeSubstance } from './scout-types';
 
 const MAX_FILES = 5;
@@ -175,7 +176,7 @@ function MessageBlock({ message }: { message: MessageRow }) {
 }
 
 const QUICK_PROMPTS = [
-  'Find programs for me',
+  'Find more programmes',
   'Update my preferences',
   'Review my shortlist',
   'Help with my profile',
@@ -208,6 +209,7 @@ export default function ScoutChat() {
   const [draft, setDraft] = useState('');
   const [files, setFiles] = useState<File[]>([]);
   const [working, setWorking] = useState<string | null>(null);
+  const [streamingReply, setStreamingReply] = useState('');
   const [fileNote, setFileNote] = useState('');
   const [showJump, setShowJump] = useState(false);
 
@@ -219,10 +221,17 @@ export default function ScoutChat() {
   const autoParsing = useRef(false);
   const maintained = useRef(false);
   const [maintenanceDone, setMaintenanceDone] = useState(false);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const retryTextRef = useRef<string | null>(null);
 
   const scrollToBottom = useCallback((smooth = true) => {
-    requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'end' }));
+    requestAnimationFrame(() => {
+      const chatScroller = scrollRef.current;
+      if (!chatScroller) return;
+      chatScroller.scrollTo({
+        top: chatScroller.scrollHeight,
+        behavior: smooth ? 'smooth' : 'auto',
+      });
+    });
   }, []);
 
   useEffect(() => {
@@ -231,7 +240,7 @@ export default function ScoutChat() {
 
   useEffect(() => {
     scrollToBottom();
-  }, [messages.length, working, scrollToBottom]);
+  }, [messages.length, working, streamingReply, scrollToBottom]);
 
   // First-run greeting. The in-memory message list can be transiently empty
   // (slow or failed history load), so the greeting only posts after the
@@ -252,7 +261,7 @@ export default function ScoutChat() {
         ? `Welcome back${name}! Your search setup is saved — ask me to find programs, adjust your preferences, or review your shortlist anytime.${
             firstQuestion ? `\n\nOne thing still open from your setup: ${firstQuestion.text}` : ''
           }`
-        : `Hi${name}, I'm Scout — I help you discover university programs that genuinely fit you, and keep your shortlist organized while you decide.\n\nA few things you can do here: chat with me to search for programs, upload your resume (PDF) and I'll build your profile, or just tell me what you're looking for.\n\nTo get started: ${
+        : `Hi${name}, I'm Scout — I help you discover university programmes and eligible apprenticeships that genuinely fit you, and keep your shortlist organized while you decide.\n\nA few things you can do here: chat with me to run a live programme search, upload your resume (PDF) and I'll build your profile, or tell me every country where you are a citizen or permanent resident so apprenticeship results stay relevant.\n\nTo get started: ${
             firstQuestion ? firstQuestion.text : 'tell me a little about what you want to study.'
           }`;
       appendLocalMessage({ role: 'assistant', content: greeting });
@@ -291,7 +300,8 @@ export default function ScoutChat() {
       documents.find((d) => d.url && d.content_type === 'application/pdf');
     if (!doc?.url || autoParsedDocs.current.has(doc.url)) return;
     const unparsedUrl = profile.resumeSourceUrl !== doc.url;
-    if (!unparsedUrl && !profileMissingResumeSubstance(profile)) return;
+    const needsEducationDateRepair = profile.education.some((item) => item.inProgress && !!item.endYear);
+    if (!unparsedUrl && !profileMissingResumeSubstance(profile) && !needsEducationDateRepair) return;
     autoParsedDocs.current.add(doc.url);
 
     autoParsing.current = true;
@@ -305,8 +315,13 @@ export default function ScoutChat() {
             if (!store.isMobile) setActiveTab('recommendations');
           },
         };
-        const line = await parseResumePdf(doc.url || '', doc.name, deps).catch(() => null);
-        if (line) await markDocumentAsResume(doc.url || '').catch(() => undefined);
+        const result = await parseResumePdf(doc.url || '', doc.name, deps);
+        if (result.status === 'complete' || result.status === 'partial') {
+          await markDocumentAsResume(doc.url || '').catch(() => undefined);
+          if (result.status === 'partial') setFileNote(result.message);
+        } else if (result.status === 'failure' && /resume|cv/i.test(doc.name)) {
+          setFileNote(`${result.message}. Please try uploading the PDF again.`);
+        }
       } finally {
         autoParsing.current = false;
         setWorking(null);
@@ -350,6 +365,7 @@ export default function ScoutChat() {
     setDraft('');
     setFiles([]);
     setFileNote('');
+    setStreamingReply('');
     setWorking('Thinking…');
 
     const preLines: string[] = [];
@@ -381,29 +397,46 @@ export default function ScoutChat() {
       // 2) Show + persist the user's message (awaited before the final reload
       // so the server copy is in place when local temps get replaced).
       const userContent = text || `Shared ${attachments.map((a) => a.name).join(', ')}`;
-      appendLocalMessage({ role: 'user', content: userContent, attachments });
-      const userPersist = persistMessage({ role: 'user', content: userContent, attachments }).catch(() => undefined);
+      const isRetry = !attachments.length && retryTextRef.current === userContent;
+      if (isRetry) retryTextRef.current = null;
+      else appendLocalMessage({ role: 'user', content: userContent, attachments });
+      const userPersist = isRetry
+        ? Promise.resolve()
+        : persistMessage({ role: 'user', content: userContent, attachments }).catch(() => undefined);
 
       // 3) Parse any attached PDFs that turn out to be resumes → Profile pipeline.
       const deps: AgentDeps = {
         ...store,
+        retryingConnectionIssue: isRetry,
         setWorking,
         // Surface fresh recommendations in the right panel — but never yank a
         // mobile user out of the chat mid-conversation.
         onProgramsDiscovered: () => {
           if (!store.isMobile) setActiveTab('recommendations');
         },
+        onReplyDelta: (reply) => {
+          setStreamingReply(reply);
+          setWorking('Writing…');
+        },
       };
       const parsedNotes: string[] = [];
       for (const att of attachments) {
         setWorking(`Reading ${att.name}…`);
-        const line = await parseResumePdf(att.url, att.name, deps, sourceFiles.get(att.url)).catch(() => null);
-        if (line) {
-          preLines.push(line);
-          parsedNotes.push(`${att.name} was parsed as a resume and the student's profile has been updated with it.`);
+        const result = await parseResumePdf(att.url, att.name, deps, sourceFiles.get(att.url));
+        if (result.status === 'complete' || result.status === 'partial') {
+          preLines.push(result.message);
+          parsedNotes.push(
+            result.status === 'complete'
+              ? `${att.name} was parsed as a resume and the student's profile has been updated with it.`
+              : result.stage === 'bio'
+                ? `${att.name} was parsed as a resume and its factual Profile details were saved, but the Bio refresh is still pending.`
+                : `${att.name} was parsed as a resume and the Profile was updated, but the search setup refresh failed.`
+          );
           markDocumentAsResume(att.url).catch(() => undefined);
+        } else if (result.status === 'failure') {
+          preLines.push(`${result.message} — please try uploading the PDF again`);
         } else if (/resume|cv/i.test(att.name)) {
-          preLines.push(`Saved ${att.name}, but couldn't extract profile details from it`);
+          preLines.push(`Saved ${att.name}, but it doesn't appear to contain a resume`);
         }
       }
 
@@ -412,15 +445,56 @@ export default function ScoutChat() {
       const attachmentNote = attachments.length
         ? `The student attached ${attachments.map((a) => a.name).join(', ')} (saved to their Documents). ${parsedNotes.join(' ')}`
         : '';
-      const result = await runAgentTurn(userContent, attachmentNote, deps);
+      let result;
+      try {
+        result = await runAgentTurn(userContent, attachmentNote, deps);
+      } catch (error) {
+        if (!isAgentApiError(error)) throw error;
+        const connectionMessage =
+          'It looks like there was a connection issue — please check your internet and try sending your answer again.';
+        retryTextRef.current = userContent;
+        setDraft(userContent);
+        appendLocalMessage({ role: 'assistant', content: connectionMessage, actions: preLines });
+        await userPersist;
+        await persistMessage({ role: 'assistant', content: connectionMessage, actions: preLines }).catch(() => undefined);
+        return;
+      }
+
+      // University discovery is handled by Scout's existing live-search agent.
+      // When the student opted into apprenticeships, add a second live search
+      // across every country where they hold citizenship or permanent residency.
+      try {
+        const apprenticeship = await discoverEligibleApprenticeships(userContent, store);
+        if (apprenticeship.attempted && apprenticeship.note) {
+          result.reply = `${result.reply}\n\n${apprenticeship.note}`;
+          if (apprenticeship.added > 0) {
+            result.actionLines.push(`Added ${apprenticeship.added} live apprenticeship recommendation${apprenticeship.added === 1 ? '' : 's'} from eligible countries`);
+          }
+        }
+      } catch {
+        result.reply = `${result.reply}\n\nI couldn't complete the apprenticeship part of the live search just now, so I haven't shown unverified schemes. You can ask me to search again.`;
+      }
+
+      const deliveredRecommendations = result.actionLines.some((line) =>
+        /added \d+ (?:new program|live apprenticeship recommendation)/i.test(line)
+      );
+      if (deliveredRecommendations) {
+        result.reply = `${result.reply}\n\nEnjoyed using Scout? We'd love your feedback — it takes about 5 minutes and directly shapes what we build next: [Share your feedback](https://tally.so/r/QKLEZp)`;
+      }
 
       const actionLines = [...preLines, ...result.actionLines];
       appendLocalMessage({ role: 'assistant', content: result.reply, actions: actionLines });
+      setStreamingReply('');
+      // Preserve transcript ordering, then overlap the independent assistant
+      // insert and program refresh instead of paying their latency in sequence.
       await userPersist;
-      await persistMessage({ role: 'assistant', content: result.reply, actions: actionLines }).catch(() => undefined);
+      await Promise.all([
+        persistMessage({ role: 'assistant', content: result.reply, actions: actionLines }).catch(() => undefined),
+        reloadPrograms().catch(() => undefined),
+      ]);
     } finally {
+      setStreamingReply('');
       setWorking(null);
-      reloadPrograms().catch(() => undefined);
     }
   };
 
@@ -435,13 +509,6 @@ export default function ScoutChat() {
     }
     return groups;
   }, [messages]);
-
-  const autoGrow = () => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
-  };
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-[var(--space-surface-page)]/60 relative">
@@ -462,8 +529,18 @@ export default function ScoutChat() {
               </div>
             </div>
           ))}
+          {streamingReply && (
+            <div className="max-w-[94%] mt-5" aria-live="polite" aria-label="Scout is responding">
+              <div className={`text-[15px] ${typography.color.primary}`}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents} urlTransform={markdownUrlTransform}>
+                  {streamingReply}
+                </ReactMarkdown>
+                <span className="inline-block w-1.5 h-4 ml-0.5 align-middle rounded-sm bg-[var(--space-brand-primary)] animate-pulse" />
+              </div>
+            </div>
+          )}
           {working && (
-            <div className="flex items-center gap-2 mt-5">
+            <div className="flex items-center gap-2 mt-5" role="status" aria-live="polite">
               <div className="flex items-center gap-2 px-3 py-1.5 bg-white border border-[var(--space-border-default)] rounded-full shadow-sm">
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--space-brand-primary-700)]" />
                 <span className={`text-xs font-medium ${typography.color.secondary}`}>{working}</span>
@@ -479,7 +556,7 @@ export default function ScoutChat() {
         <button
           type="button"
           onClick={() => scrollToBottom()}
-          className="absolute bottom-[132px] left-1/2 -translate-x-1/2 w-9 h-9 rounded-full bg-white border border-[var(--space-border-default)] shadow-md flex items-center justify-center text-[var(--space-text-secondary)] hover:bg-[var(--space-surface-muted)] transition-colors z-10"
+          className="absolute bottom-[152px] left-1/2 -translate-x-1/2 w-9 h-9 rounded-full bg-white border border-[var(--space-border-default)] shadow-md flex items-center justify-center text-[var(--space-text-secondary)] hover:bg-[var(--space-surface-muted)] transition-colors z-10"
           aria-label="Jump to latest"
         >
           <ArrowDown className="w-4 h-4" />
@@ -552,13 +629,9 @@ export default function ScoutChat() {
               <Plus className="w-[18px] h-[18px]" />
             </button>
             <textarea
-              ref={textareaRef}
               value={draft}
               rows={1}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                autoGrow();
-              }}
+              onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
@@ -566,7 +639,7 @@ export default function ScoutChat() {
                 }
               }}
               placeholder="Ask Scout anything…"
-              className="flex-1 resize-none bg-transparent outline-none text-[15px] leading-6 py-1.5 max-h-[140px] text-[var(--space-text-primary)] placeholder:text-[var(--space-text-muted)]"
+              className="flex-1 resize-none [field-sizing:content] bg-transparent outline-none text-[15px] leading-6 py-1.5 max-h-[140px] overflow-y-auto text-[var(--space-text-primary)] placeholder:text-[var(--space-text-muted)]"
             />
             <button
               type="button"

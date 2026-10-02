@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Save, CreditCard, LogOut, Clock, CheckCircle2, AlertCircle, Loader2, ExternalLink, CalendarX } from 'lucide-react';
 import { useSpaceRuntime } from '../SpaceRuntimeContext';
 import { settingsStyles } from '../lib/colors';
+import { logoutUser } from './AppProfileMenu';
 
 interface SettingsProps {
   spaceId: string;
@@ -208,12 +209,9 @@ export default function Settings({ spaceId }: SettingsProps) {
   };
 
   const handleSignOut = () => {
-    const sessionKey = getSessionStorageKey(spaceId);
-    localStorage.removeItem(sessionKey);
     setEmail('');
     setSubscriptionStatus(null);
-    setSessionId('');
-    window.location.reload();
+    logoutUser(spaceId, setSessionId);
   };
 
   const handleSubscribe = async () => {

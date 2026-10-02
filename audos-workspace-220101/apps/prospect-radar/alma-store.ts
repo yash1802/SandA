@@ -37,10 +37,27 @@ export function db(table: string) {
   return (window as any).__workspaceDb.from(table, { shared: true });
 }
 
+function analyticsDb(table: string) {
+  return (window as any).__workspaceDb.from(table);
+}
+
 export interface SessionIdentity {
   email: string;
   name: string;
   institution: string;
+}
+
+function readAlmaActorType(): 'institution' | 'company' {
+  if (typeof window === 'undefined') return 'institution';
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key?.startsWith('space_role_') && localStorage.getItem(key) === 'company') return 'company';
+    }
+  } catch {
+    // default below
+  }
+  return 'institution';
 }
 
 export function readSessionIdentity(): SessionIdentity {
@@ -79,7 +96,7 @@ const GENERIC_MAIL_HOSTS =
 export function institutionLogoUrl(email: string): string {
   const domain = (email.split('@')[1] || '').trim().toLowerCase();
   if (!domain || GENERIC_MAIL_HOSTS.test(domain)) return '';
-  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`;
+  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=32`;
 }
 
 // ---------------------------------------------------------------------------
@@ -188,19 +205,51 @@ export async function llmChat(
   messages: { role: string; content: string }[],
   opts: { temperature?: number; maxTokens?: number; model?: string } = {}
 ): Promise<LlmResult> {
-  const res = await fetch('/proxy/openai/v1/chat/completions', {
+  const system = messages
+    .filter((message) => message.role === 'system')
+    .map((message) => message.content)
+    .filter(Boolean)
+    .join('\n\n');
+  const conversation: { role: 'user' | 'assistant'; content: string }[] = [];
+  for (const message of messages) {
+    if (message.role !== 'user' && message.role !== 'assistant') continue;
+    const content = String(message.content || '').trim();
+    if (!content) continue;
+    const role = message.role as 'user' | 'assistant';
+    const previous = conversation[conversation.length - 1];
+    if (previous?.role === role) previous.content += `\n\n${content}`;
+    else conversation.push({ role, content });
+  }
+  // Anthropic conversations begin with a user turn. Preserve a leading
+  // assistant greeting as context without dropping it.
+  if (conversation[0]?.role === 'assistant') {
+    conversation.unshift({ role: 'user', content: 'Conversation context follows.' });
+  }
+
+  const res = await fetch('/proxy/anthropic/v1/messages', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Workspace-DB-Token': (window as any).__workspaceDb?.token || '',
+    },
     body: JSON.stringify({
-      model: opts.model || 'gpt-4o-mini',
-      temperature: opts.temperature ?? 0.4,
+      model: opts.model || 'claude-sonnet-5',
       max_tokens: opts.maxTokens ?? 1400,
-      messages,
+      thinking: { type: 'disabled' },
+      ...(system ? { system } : {}),
+      messages: conversation,
     }),
   });
-  if (!res.ok) throw new Error(`AI request failed (${res.status})`);
-  const data = await res.json();
-  return { content: String(data?.choices?.[0]?.message?.content || '') };
+  const data = await res.json().catch(() => null);
+  if (!res.ok || data?.error) {
+    throw new Error(data?.error?.message || `AI request failed (${res.status})`);
+  }
+  return {
+    content: (Array.isArray(data?.content) ? data.content : [])
+      .filter((block: any) => block?.type === 'text')
+      .map((block: any) => String(block.text || ''))
+      .join(''),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +351,10 @@ export interface AlmaStore {
   savedList: CandidateRow[];
   contactedList: CandidateRow[];
   defaultMessage: string;
+  trackActivity: (
+    eventType: string,
+    details?: { studentId?: string | null; candidateId?: number | null; metadata?: Record<string, any> }
+  ) => Promise<void>;
 
   setStatus: (id: number, next: CandidateStatus, feedback?: SkipFeedback) => Promise<boolean>;
   addCandidates: (items: NewCandidate[]) => Promise<number>;
@@ -330,6 +383,7 @@ let tempId = -1;
 
 export function useAlmaStore(): AlmaStore {
   const identity = useMemo(readSessionIdentity, []);
+  const actorType = useMemo(readAlmaActorType, []);
   // Founder previews may not carry a customer session; fall back to a stable key.
   const email = identity.email || 'preview@alma.local';
 
@@ -357,6 +411,26 @@ export function useAlmaStore(): AlmaStore {
   const [intake, setIntake] = useState<IntakeData>(emptyIntake());
   const [brief, setBrief] = useState<BriefData>(emptyBrief());
   const [profile, setProfile] = useState<ProgramProfile>(emptyProfile());
+
+  const trackActivity = useCallback(
+    async (
+      eventType: string,
+      details: { studentId?: string | null; candidateId?: number | null; metadata?: Record<string, any> } = {}
+    ) => {
+      await analyticsDb('inbox_alma_activity').insert({
+        actor_id: email,
+        actor_type: actorType,
+        institution_name: identity.institution || 'Your institution',
+        program_id: activeProgramId,
+        student_id: details.studentId || null,
+        candidate_id: details.candidateId || null,
+        event_type: eventType,
+        metadata_json: details.metadata || {},
+        occurred_at: new Date().toISOString(),
+      });
+    },
+    [email, actorType, identity.institution, activeProgramId]
+  );
 
   const candidatesRef = useRef(allCandidates);
   candidatesRef.current = allCandidates;
@@ -521,6 +595,7 @@ export function useAlmaStore(): AlmaStore {
     (async () => {
       try {
         await Promise.all([reloadPrograms(), reloadCandidates()]);
+        trackActivity('app_open', { metadata: { surface: 'alma' } }).catch(() => undefined);
         if (!cancelled) setLoadError('');
       } catch (err) {
         if (!cancelled) setLoadError(err instanceof Error ? err.message : 'Could not load your data.');
@@ -631,6 +706,11 @@ export function useAlmaStore(): AlmaStore {
         // The event insert is what makes the change durable; the direct row
         // update is best-effort so the base table stays readable on its own.
         await db('alma_candidate_events').insert({ user_email: email, candidate_id: id, patch_json: patch });
+        await trackActivity(next === 'saved' || next === 'contacted' ? 'expressed_interest' : 'candidate_status', {
+          studentId: current.student_email || null,
+          candidateId: id,
+          metadata: { previous_status: current.status, next_status: next, feedback: feedback || null, patch },
+        });
         db('alma_candidates')
           .update(id, patch)
           .catch(() => undefined);
@@ -662,10 +742,12 @@ export function useAlmaStore(): AlmaStore {
         recommended_at: new Date(base - i * 1000).toISOString(),
       }));
       await db('alma_candidates').bulkInsert(rows);
-      await reloadCandidates();
+      await trackActivity('search', {
+        metadata: { result_count: rows.length, source: 'scout_opted_in_students', program_id: programId },
+      });
       return rows.length;
     },
-    [email, activeProgramId, reloadCandidates]
+    [email, activeProgramId]
   );
 
   const addDocument = useCallback(
@@ -751,14 +833,19 @@ export function useAlmaStore(): AlmaStore {
   const persistMessage = useCallback(
     async (m: Pick<MessageRow, 'role' | 'content'> & { attachments?: MessageAttachment[]; actions?: string[] }) => {
       if (activeProgramId == null) return;
-      await db('alma_messages').insert({
-        user_email: email,
-        program_id: activeProgramId,
-        role: m.role,
-        content: m.content,
-        attachments: JSON.stringify(m.attachments || []),
-        actions: JSON.stringify(m.actions || []),
-      });
+      await Promise.all([
+        db('alma_messages').insert({
+          user_email: email,
+          program_id: activeProgramId,
+          role: m.role,
+          content: m.content,
+          attachments: JSON.stringify(m.attachments || []),
+          actions: JSON.stringify(m.actions || []),
+        }),
+        trackActivity('message', {
+          metadata: { role: m.role, content: m.content, attachments: m.attachments || [], actions: m.actions || [] },
+        }),
+      ]);
     },
     [email, activeProgramId]
   );
@@ -774,6 +861,7 @@ export function useAlmaStore(): AlmaStore {
         brochure_url: input.brochure_url || null,
         brochure_name: input.brochure_name || null,
       });
+      await trackActivity('programme_create', { metadata: input });
       // The SDK insert doesn't return the row — reload and find the newest match.
       const { data } = await db('alma_programs').eq('user_email', email).orderBy('id', 'desc').limit(20).get();
       const rows = Array.isArray(data) ? (data as ProgramRow[]) : [];
@@ -797,6 +885,7 @@ export function useAlmaStore(): AlmaStore {
       if (patch.campus_location != null) row.campus_location = patch.campus_location;
       if (!Object.keys(row).length) return;
       await db('alma_programs').update(id, row);
+      await trackActivity('programme_update', { metadata: { program_id: id, patch: row } });
       await reloadPrograms();
     },
     [reloadPrograms]
@@ -864,7 +953,7 @@ export function useAlmaStore(): AlmaStore {
   );
 
   const displayName = identity.name || (identity.email ? identity.email.split('@')[0] : 'Representative');
-  const institutionName = identity.institution || 'Your university';
+  const institutionName = identity.institution || (actorType === 'company' ? 'Your company' : 'Your university');
 
   return {
     email,
@@ -892,6 +981,7 @@ export function useAlmaStore(): AlmaStore {
     savedList,
     contactedList,
     defaultMessage,
+    trackActivity,
     setStatus,
     addCandidates,
     saveIntake,

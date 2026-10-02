@@ -25,6 +25,8 @@ import {
   MiscItem,
   ProfileData,
   ProgramDetails,
+  profileFactsForBio,
+  profileFactsKey,
   ProgramRow,
   ProgramStatus,
   ResearchItem,
@@ -46,7 +48,20 @@ import {
   sanitizeBrief,
   sniffProgramLevel,
 } from './scout-types';
-import { NewProgram, analyzeDocument, llmChat, webSearch } from './scout-store';
+import {
+  NewProgram,
+  ProfileSaveOptions,
+  ProfileSaveReceipt,
+  ScoutStatePatch,
+  analyzeDocument,
+  isAgentApiError,
+  llmChat,
+  webSearch,
+} from './scout-store';
+
+function rethrowAgentApiError(error: unknown): void {
+  if (isAgentApiError(error)) throw error;
+}
 
 export interface AgentDeps {
   email: string;
@@ -58,14 +73,17 @@ export interface AgentDeps {
   documents: DocumentRow[];
   messages: MessageRow[];
   invitations?: InvitationRow[];
+  retryingConnectionIssue?: boolean;
+  saveState: (next: ScoutStatePatch) => Promise<void>;
   saveIntake: (next: IntakeData) => Promise<void>;
   saveBrief: (next: BriefData) => Promise<void>;
-  saveProfile: (next: ProfileData) => Promise<void>;
+  saveProfile: (next: ProfileData, options?: ProfileSaveOptions) => Promise<ProfileSaveReceipt>;
   setStatus: (id: number, next: ProgramStatus, feedback?: SkipFeedback) => Promise<void>;
   updateProgram: (id: number, patch: Record<string, any>) => Promise<void>;
   addPrograms: (items: NewProgram[]) => Promise<number>;
   setWorking: (label: string | null) => void;
   onProgramsDiscovered?: () => void;
+  onReplyDelta?: (replySoFar: string) => void;
 }
 
 const s = (v: unknown, max = 400): string => (v == null ? '' : String(v)).trim().slice(0, max);
@@ -74,12 +92,21 @@ const s = (v: unknown, max = 400): string => (v == null ? '' : String(v)).trim()
 interface TurnFlags {
   capturedKeys: string[];
   lookingForRefreshed: boolean;
+  intakeCompletedThisTurn: boolean;
   searchRan: boolean;
   resumeParsed: boolean;
+  stateChanged: boolean;
 }
 
 function newTurnFlags(): TurnFlags {
-  return { capturedKeys: [], lookingForRefreshed: false, searchRan: false, resumeParsed: false };
+  return {
+    capturedKeys: [],
+    lookingForRefreshed: false,
+    intakeCompletedThisTurn: false,
+    searchRan: false,
+    resumeParsed: false,
+    stateChanged: false,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -144,9 +171,15 @@ AVAILABLE ACTIONS:
    The Search Brief is your internal document of the student's search preferences, bucketed by fit. Include ONLY the factors you want to change — factors you leave out (or leave with all-empty buckets) are preserved as they are. Never return an emptied factor to "clear" it unless the student explicitly asked to remove those preferences.
    BRIEF ENTRY RULES: every entry is a concise KEYWORD of 1-4 words in Title Case (e.g. "Management", "London", "Under $60k/yr") — NEVER the student's full sentence. Extract the keyword from what they said ("im an indian citizen" → "Indian"). Use ALL FOUR buckets when their words support it: excellent = clearly wanted, good = acceptable alternatives, borderline = hedged/stretch options, notAFit = explicitly ruled out. Never repeat an entry anywhere within the same factor.
 4. {"type":"search_programs","criteria":{"focus":"<what to look for>","university":"<limit to one university>","locations":"<where>","level":"<undergraduate/graduate/degree type>","budget":"<constraint>","count":5}}
-   Trigger a live web search for real university programs. Found programs are added to the student's Recommendations automatically. Include only relevant criteria keys; omit "criteria" entirely to search from the student's saved preferences.
-5. {"type":"set_program_status","programId":<id>,"status":"saved"|"safe"|"target"|"dream"|"skipped"}
-   Manage the shortlist: move a program between shortlist columns (saved/safe/target/dream), skip one the student no longer wants, or bring a skipped program back (use "saved").
+   Trigger a live web search only after the intake checklist is complete. Never emit this action while any required intake question remains unanswered. Found programs are added to the student's Recommendations automatically. Include only relevant criteria keys; omit "criteria" entirely to search from the student's saved preferences.
+5. {"type":"add_to_shortlist","program_id":<id>,"column":"saved"|"safe"|"target"|"dream"}
+   Add a recommendation or skipped program to the requested shortlist column. Default to "saved" only when the student did not name a column.
+6. {"type":"move_program","program_id":<id>,"to_column":"saved"|"safe"|"target"|"dream"}
+   Move an already-shortlisted program to another shortlist column.
+7. {"type":"remove_from_shortlist","program_id":<id>}
+   Remove a program from the shortlist and return it to Recommendations.
+8. {"type":"set_program_status","programId":<id>,"status":"saved"|"safe"|"target"|"dream"|"skipped"}
+   Legacy status action: use only to skip a program. Prefer the explicit shortlist actions above for adding, moving, or removing.
 
 CRITICAL RULES:
 - NOTHING RUNS IN THE BACKGROUND. Work happens ONLY through actions in THIS response, and system notes tell you what already happened this turn. NEVER say "hold on", "one moment", "please wait", "while I process/gather", or promise results "shortly". If something already ran (see system notes), report its outcome in past tense. If you cannot do something, say so plainly and ask for what you need.
@@ -154,10 +187,16 @@ CRITICAL RULES:
 - ONE QUESTION AT A TIME. Work through the intake checklist below in order, weaving exactly one unanswered question naturally into each reply (after addressing whatever the student said). NEVER re-ask an ANSWERED question — a changed answer (e.g. new budget) does not reset the checklist; continue from the next UNANSWERED question only.
 - The "motivations" question is ONLY for students interested in graduate programs. Skip it for undergraduates.
 - CLARIFY BEFORE ACTING. If a requested action is ambiguous (e.g. "remove a skill" without naming it, or a program reference that matches nothing in PROGRAMS), ask a clarifying question and emit NO action for it.
-- If the student asks you to find/recommend programs, the system usually runs the search before you reply (see system notes). Only emit search_programs yourself if no search ran this turn and the student clearly wants one.
+- NEVER emit search_programs while the INTAKE CHECKLIST STATE has a NEXT QUESTION TO ASK. Program search is blocked until the checklist says CHECKLIST COMPLETE. The system automatically searches as soon as the final required answer completes intake. While intake is incomplete, ask exactly the next unanswered question and do not say a search is running, starting, or coming later.
+- After the checklist is complete, the system usually runs requested searches before you reply (see system notes). Only emit search_programs if the checklist is complete, no search ran this turn, and the student clearly wants another search.
 - RESUME ACCESS: if a RESUME ON FILE section appears below, you have the resume's full text — answer questions about it directly and NEVER say you cannot access the resume. Profile updates from the resume happen automatically; if the student says their profile is incomplete, the system re-parses the resume this turn (see system notes) — report what was filled in.
 - If CURRENT PROFILE shows a completed or in-progress master's, MBA, MPhil, doctorate, or other postgraduate education, treat the student as looking for graduate/postgraduate opportunities unless they explicitly ask for a bachelor's/undergraduate search.
 - Answer questions about their current recommendations, shortlist, profile, brief, or documents directly from the state below — no action needed for reading.
+- SEARCH PROGRESS belongs only in the app's status indicator. Never write "Search running:" or any other in-progress status line in the student-facing reply.
+- SEARCH METHOD: first identify a program's official overview URL with a targeted academic-domain query, then open that page and search that exact official host for details. Prefer official university pages over aggregators. If official results are unavailable, still recommend relevant programs from general knowledge and clearly say: "Based on what I know — verify specific details on the official site." Never refuse to recommend solely because search evidence is incomplete.
+- DATE FRESHNESS: today is the date stated at the top of this prompt. Prefer 2026 or clearly labeled 2026–27 sources. If a deadline or application cycle has passed, say: "Note: this deadline may be for a past cycle — check the official site for 2027 intake dates." Never present an October 2025 or Fall 2026 application notice as currently open.
+- NUMERICAL FACTS: only state cohort size, class size, tuition, test averages, acceptance rates, rankings, or other figures when that exact number appears in official search evidence supplied this turn or in the stored program record. If it is not confirmed, say it is not listed on the official page. Never infer, extrapolate, or guess a statistic.
+- ACTION CONFIRMATION: when you emit a shortlist action, do not claim it is complete in the drafted reply. The system executes it after generation and replaces the reply with a confirmation only after the database call succeeds.
 - Be warm, personal, and concise. Refer to programs by name. Never fabricate programs, scores, or facts.
 
 INTAKE CHECKLIST STATE:
@@ -187,6 +226,40 @@ interface RawAction {
   [key: string]: any;
 }
 
+// Decode only the user-visible `reply` string from a partial JSON response.
+// Actions remain hidden and are parsed only after the complete stream arrives.
+function extractReplyPrefix(raw: string): string {
+  const match = /(?:^|[,{]\s*)"reply"\s*:\s*"/.exec(raw);
+  if (!match) return '';
+  let i = match.index + match[0].length;
+  let out = '';
+  while (i < raw.length) {
+    const ch = raw[i];
+    if (ch === '\\') {
+      i++;
+      if (i >= raw.length) break;
+      const escaped = raw[i];
+      if (escaped === 'n') out += '\n';
+      else if (escaped === 'r') out += '\r';
+      else if (escaped === 't') out += '\t';
+      else if (escaped === 'b') out += '\b';
+      else if (escaped === 'f') out += '\f';
+      else if (escaped === 'u') {
+        const hex = raw.slice(i + 1, i + 5);
+        if (!/^[0-9a-f]{4}$/i.test(hex)) break;
+        out += String.fromCharCode(parseInt(hex, 16));
+        i += 4;
+      } else out += escaped;
+      i++;
+      continue;
+    }
+    if (ch === '"') break;
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
 function normalizeFitReasons(raw: any): FitReason[] {
   return asArr<any>(raw)
     .map((r) => ({ title: s(r?.title, 80) || 'Why it fits', detail: s(r?.detail, 400) }))
@@ -201,7 +274,6 @@ function normalizeProfilePatch(raw: any, current: ProfileData): ProfileData {
   if (typeof raw.headline === 'string') next.headline = s(raw.headline, 160);
   if (typeof raw.location === 'string') next.location = s(raw.location, 120);
   if (typeof raw.visible === 'boolean') next.visible = raw.visible;
-  if (typeof raw.bio === 'string') next.bio = s(raw.bio, 1200);
   if (typeof raw.lookingFor === 'string') next.lookingFor = s(raw.lookingFor, 1200);
   if (Array.isArray(raw.education)) {
     next.education = raw.education
@@ -297,7 +369,8 @@ function titleCase(x: string): string {
 
 function locationChips(answer: string): string[] {
   const chips = [...prefCountries(answer).map(displayCountry), ...prefCities(answer).map(titleCase)];
-  return chips.length ? chips : splitList(answer);
+  const parsed = chips.length ? chips : splitList(answer).map(titleCase);
+  return [...new Set(parsed.filter(Boolean))];
 }
 
 const ANSWER_FACTOR_MAP: { answer: string; factor: FactorKey; hint: string; single?: boolean; chips?: (v: string) => string[] }[] = [
@@ -381,7 +454,7 @@ Include exactly the factors listed above.`,
 // while an answer exists (self-heal for briefs that were wiped). Distillation
 // extracts keywords across all buckets; the deterministic splitter is only the
 // emergency fallback.
-async function reconcileBriefWithAnswers(deps: AgentDeps, changedKeys: Set<string>): Promise<boolean> {
+async function reconcileBriefWithAnswers(deps: AgentDeps, changedKeys: Set<string>): Promise<BriefData | null> {
   const answers = deps.intake.answers || {};
   const targets = ANSWER_FACTOR_MAP.filter((map) => {
     const answer = (answers[map.answer] || '').trim();
@@ -392,12 +465,13 @@ async function reconcileBriefWithAnswers(deps: AgentDeps, changedKeys: Set<strin
     const factorInvalid = BUCKET_DEFS.some((b) => deps.brief.factors[map.factor][b.key].some((e) => !isKeywordChip(e)));
     return changedKeys.has(map.answer) || factorEmpty || factorInvalid;
   });
-  if (!targets.length) return false;
+  if (!targets.length) return null;
 
   let distilled: Partial<Record<FactorKey, Record<string, string[]>>> | null = null;
   try {
     distilled = await distillBriefFactors(answers, targets);
-  } catch {
+  } catch (error) {
+    rethrowAgentApiError(error);
     distilled = null;
   }
 
@@ -405,7 +479,9 @@ async function reconcileBriefWithAnswers(deps: AgentDeps, changedKeys: Set<strin
   for (const map of targets) {
     const answer = (answers[map.answer] || '').trim();
     const buckets = distilled?.[map.factor];
-    if (buckets) {
+    const hasDistilledValues =
+      !!buckets && BUCKET_DEFS.some((bucket) => (buckets[bucket.key] || []).length > 0);
+    if (hasDistilledValues && buckets) {
       next.factors[map.factor] = {
         excellent: buckets.excellent || [],
         good: buckets.good || [],
@@ -413,6 +489,16 @@ async function reconcileBriefWithAnswers(deps: AgentDeps, changedKeys: Set<strin
         notAFit: buckets.notAFit || [],
       };
       continue;
+    }
+    if (map.factor === 'location') {
+      const values = locationChips(answer)
+        .map(titleCase)
+        .filter(isKeywordChip)
+        .slice(0, 8);
+      if (values.length) {
+        next.factors.location = { excellent: values, good: [], borderline: [], notAFit: [] };
+        continue;
+      }
     }
     const values = (map.single ? [answer.slice(0, 80)] : map.chips ? map.chips(answer) : splitList(answer))
       .map(titleCase)
@@ -422,10 +508,8 @@ async function reconcileBriefWithAnswers(deps: AgentDeps, changedKeys: Set<strin
     next.factors[map.factor] = { excellent: values, good: [], borderline: [], notAFit: [] };
   }
   const cleaned = sanitizeBrief(next);
-  if (!briefChanged(deps.brief, cleaned)) return false;
-  await deps.saveBrief(cleaned);
-  deps.brief = cleaned;
-  return true;
+  if (!briefChanged(deps.brief, cleaned)) return null;
+  return cleaned;
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +573,7 @@ async function moveUndergraduateProgramsOutOfActiveList(deps: AgentDeps): Promis
       reasons: ["The program doesn't match my expectations"],
       note: 'Moved automatically after the resume indicated a postgraduate search.',
     });
+    program.status = 'skipped';
   }
   return stalePrograms.length;
 }
@@ -565,8 +650,9 @@ async function executeAction(action: RawAction, deps: AgentDeps, turn: TurnFlags
     case 'update_profile': {
       if (!action.profile || typeof action.profile !== 'object') return [];
       const next = normalizeProfilePatch(action.profile, deps.profile);
-      await deps.saveProfile(next);
-      deps.profile = next;
+      if (JSON.stringify(next) === JSON.stringify(deps.profile)) return [];
+      const receipt = await deps.saveProfile(next);
+      deps.profile = receipt.profile;
       return ['Updated your Profile'];
     }
 
@@ -592,27 +678,53 @@ async function executeAction(action: RawAction, deps: AgentDeps, turn: TurnFlags
       return ['Updated your Search Brief'];
     }
 
+    case 'add_to_shortlist':
+    case 'move_program':
+    case 'remove_from_shortlist':
     case 'set_program_status': {
-      const id = Number(action.programId);
-      const status = String(action.status || '') as ProgramStatus;
-      const valid: ProgramStatus[] = ['saved', 'safe', 'target', 'dream', 'skipped'];
+      const id = Number(action.program_id ?? action.programId);
       const program = deps.programs.find((p) => p.id === id);
-      if (!program || !valid.includes(status)) return ["Couldn't find that program — no changes made"];
+      if (!program) return ["Couldn't find that program — no changes made"];
+
+      let status: ProgramStatus;
+      if (action.type === 'remove_from_shortlist') status = 'recommended';
+      else if (action.type === 'move_program') status = String(action.to_column || action.toColumn || '') as ProgramStatus;
+      else if (action.type === 'add_to_shortlist') status = String(action.column || action.to_column || action.toColumn || 'saved') as ProgramStatus;
+      else status = String(action.status || '') as ProgramStatus;
+
+      const valid: ProgramStatus[] = ['recommended', 'saved', 'safe', 'target', 'dream', 'skipped'];
+      const boardColumns: ProgramStatus[] = ['saved', 'safe', 'target', 'dream'];
+      if (!valid.includes(status)) return ["Couldn't apply that shortlist change — no changes made"];
+      if ((action.type === 'add_to_shortlist' || action.type === 'move_program') && !boardColumns.includes(status)) {
+        return ["Couldn't apply that shortlist column — no changes made"];
+      }
+      if (action.type === 'move_program' && !isBoardStatus(program.status)) {
+        return ["Couldn't move that program because it is not on the shortlist — no changes made"];
+      }
+      if (action.type === 'remove_from_shortlist' && !isBoardStatus(program.status)) {
+        return ["That program is not on the shortlist — no changes made"];
+      }
+
+      const previousStatus = program.status;
       await deps.setStatus(id, status);
+      program.status = status;
       const name = `${program.university} — ${program.program_name}`;
+      if (status === 'recommended') return [`Removed ${name} from your shortlist and returned it to Recommendations`];
       if (status === 'skipped') return [`Moved ${name} to Skipped`];
-      if (isBoardStatus(program.status)) return [`Moved ${name} to ${STATUS_LABELS[status]}`];
+      if (isBoardStatus(previousStatus)) return [`Moved ${name} to ${STATUS_LABELS[status]}`];
       return [`Added ${name} to your shortlist (${STATUS_LABELS[status]})`];
     }
 
     case 'search_programs': {
-      if (turn.searchRan) return [];
-      deps.setWorking('Searching the web for programs…');
+      if (turn.searchRan || !intakeCompleted(deps.intake)) return [];
+      deps.setWorking('Searching official university sites…');
       const result = await discoverPrograms(action.criteria || {}, deps);
       turn.searchRan = true;
       if (result.added > 0) {
         deps.onProgramsDiscovered?.();
-        return [`Searched the web and added ${result.added} program${result.added === 1 ? '' : 's'} to your Recommendations`];
+        return [
+          `Searched the web and added ${result.added} program${result.added === 1 ? '' : 's'} to your Recommendations${result.caveat ? ` — ${result.caveat}` : ''}`,
+        ];
       }
       return [`Search finished — no matching programs found${result.reason ? ` (${result.reason})` : ''}`];
     }
@@ -634,8 +746,38 @@ interface CapturedState {
   searchCriteria: SearchCriteria | null;
 }
 
+const PURE_SOCIAL_TURNS = new Set([
+  'hi',
+  'hello',
+  'hey',
+  'hi there',
+  'hello there',
+  'hey there',
+  'hi scout',
+  'hello scout',
+  'hey scout',
+  'good morning',
+  'good afternoon',
+  'good evening',
+  'thanks',
+  'thank you',
+  'thanks so much',
+  'thank you so much',
+  'thank you very much',
+  'many thanks',
+]);
+
+function isPureSocialTurn(userText: string): boolean {
+  const normalized = userText
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+  return PURE_SOCIAL_TURNS.has(normalized);
+}
+
 async function extractStateUpdates(userText: string, deps: AgentDeps): Promise<CapturedState | null> {
-  if (!userText.trim()) return null;
+  if (!userText.trim() || isPureSocialTurn(userText)) return null;
   const lastAssistant = [...deps.messages].reverse().find((m) => m.role === 'assistant');
   const questionLines = INTAKE_QUESTIONS.map((q) => {
     const current = deps.intake.answers[q.id];
@@ -704,6 +846,8 @@ Rules:
 // pre-pass and the model's save_intake_answers action (idempotent merges).
 async function applyStateCapture(cap: CapturedState, deps: AgentDeps, turn: TurnFlags): Promise<string[]> {
   const lines: string[] = [];
+  const statePatch: ScoutStatePatch = {};
+  const wasIntakeComplete = intakeCompleted(deps.intake);
   const validIds = new Set(INTAKE_QUESTIONS.map((q) => q.id));
   const captured: Record<string, string> = {};
   for (const [key, value] of Object.entries(cap.answers || {})) {
@@ -733,8 +877,10 @@ async function applyStateCapture(cap: CapturedState, deps: AgentDeps, turn: Turn
         : deps.intake.programLevel || sniffProgramLevel(captured.level || ''),
     };
     nextIntake.completed = intakeCompleted(nextIntake);
-    await deps.saveIntake(nextIntake);
+    turn.intakeCompletedThisTurn =
+      turn.intakeCompletedThisTurn || (!wasIntakeComplete && nextIntake.completed);
     deps.intake = nextIntake;
+    statePatch.intake = nextIntake;
     const count = Object.keys(captured).length;
     if (count) lines.push(count === 1 ? 'Saved your answer to your search setup' : `Saved ${count} answers to your search setup`);
     turn.capturedKeys.push(...Object.keys(captured));
@@ -743,28 +889,56 @@ async function applyStateCapture(cap: CapturedState, deps: AgentDeps, turn: Turn
 
   if (typeof cap.profileVisible === 'boolean' && cap.profileVisible !== deps.profile.visible) {
     const nextProfile = { ...deps.profile, visible: cap.profileVisible };
-    await deps.saveProfile(nextProfile);
     deps.profile = nextProfile;
+    statePatch.profile = nextProfile;
     lines.push(cap.profileVisible ? 'Made your profile visible to universities' : 'Kept your profile hidden from universities');
   }
 
-  if (await reconcileBriefWithAnswers(deps, new Set(turn.capturedKeys))) {
-    lines.push('Updated your Search Brief');
+  // These derived summaries consume the same post-capture state and do not
+  // depend on one another. Run them together so answer-bearing turns pay for
+  // one model round-trip instead of two sequential ones.
+  const shouldRefreshLookingFor =
+    !turn.lookingForRefreshed && Object.keys(captured).some((k) => k !== 'visibility');
+  if (shouldRefreshLookingFor) turn.lookingForRefreshed = true;
+
+  const [briefResult, lookingForResult] = await Promise.allSettled([
+    reconcileBriefWithAnswers(deps, new Set(turn.capturedKeys)),
+    shouldRefreshLookingFor
+      ? regenerateLookingFor(deps.intake, deps.profile)
+      : Promise.resolve(null),
+  ]);
+
+  let derivedError: unknown = null;
+  if (briefResult.status === 'fulfilled') {
+    const nextBrief = briefResult.value;
+    if (nextBrief) {
+      deps.brief = nextBrief;
+      statePatch.brief = nextBrief;
+      lines.push('Updated your Search Brief');
+    }
+  } else {
+    derivedError = briefResult.reason;
   }
 
-  if (
-    !turn.lookingForRefreshed &&
-    ['majors', 'outcomes', 'priorities', 'motivations', 'level'].some((k) => captured[k])
-  ) {
-    turn.lookingForRefreshed = true;
-    const lookingFor = await regenerateLookingFor(deps.intake, deps.profile);
+  if (lookingForResult.status === 'fulfilled') {
+    const lookingFor = lookingForResult.value;
     if (lookingFor) {
       const nextProfile = { ...deps.profile, lookingFor };
-      await deps.saveProfile(nextProfile);
       deps.profile = nextProfile;
+      statePatch.profile = nextProfile;
       lines.push('Refreshed "What you\'re looking for" on your Profile');
     }
+  } else if (!derivedError) {
+    derivedError = lookingForResult.reason;
   }
+
+  // Preserve deterministic intake/profile changes and either successful
+  // derived result even when its sibling model request fails.
+  if (Object.keys(statePatch).length) {
+    turn.stateChanged = true;
+    await deps.saveState(statePatch);
+  }
+  if (derivedError) throw derivedError;
   return lines;
 }
 
@@ -822,7 +996,12 @@ function knownLevel(deps: AgentDeps): 'graduate' | 'undergraduate' | '' {
 }
 
 function knownLocations(deps: AgentDeps): string {
-  return (deps.intake.answers.locations || '').trim() || deps.brief.factors.location.excellent.join(', ');
+  const preferred =
+    deps.brief.factors.location.excellent.join(', ') ||
+    (deps.intake.answers.locations || '').trim();
+  if (!preferred) return '';
+  const normalized = locationChips(preferred);
+  return normalized.length ? normalized.join(', ') : preferred;
 }
 
 function knownBudget(deps: AgentDeps): string {
@@ -831,6 +1010,7 @@ function knownBudget(deps: AgentDeps): string {
 
 function searchReadiness(deps: AgentDeps): { ok: boolean; missing: string[] } {
   const missing: string[] = [];
+  if (!intakeCompleted(deps.intake)) missing.push('the remaining search setup questions');
   if (!knownMajors(deps)) missing.push('what they want to study');
   if (!knownLevel(deps)) missing.push('undergraduate vs graduate');
   if (!knownLocations(deps)) missing.push('their preferred locations');
@@ -838,7 +1018,13 @@ function searchReadiness(deps: AgentDeps): { ok: boolean; missing: string[] } {
 }
 
 function haveCoreFour(deps: AgentDeps): boolean {
-  return !!(knownMajors(deps) && knownLevel(deps) && knownLocations(deps) && knownBudget(deps));
+  return !!(
+    intakeCompleted(deps.intake) &&
+    knownMajors(deps) &&
+    knownLevel(deps) &&
+    knownLocations(deps) &&
+    knownBudget(deps)
+  );
 }
 
 function dedupeLines(lines: string[]): string[] {
@@ -890,18 +1076,101 @@ export interface AgentTurnResult {
   actionLines: string[];
 }
 
+interface ReplyAttempt {
+  content?: string;
+  error?: unknown;
+}
+
+function shouldSpeculateReply(userText: string, attachmentNote: string, deps: AgentDeps): boolean {
+  if (!userText.trim() || attachmentNote.trim() || isPureSocialTurn(userText)) return false;
+  if (wantsProgramSearch(userText) || wantsResumeRebuild(userText)) return false;
+
+  const text = userText.toLowerCase();
+  const lastAssistant = [...deps.messages].reverse().find((m) => m.role === 'assistant')?.content || '';
+  const actionOrStateTerms =
+    /\b(add|move|remove|shortlist|dream|target|safe|saved|skip|prefer|want|need|looking|interested|study|apply|budget|location|country|city|major|degree|master|mba|phd|bachelor|score|gpa|resume|cv|profile|visible|hidden|update|change|save)\b/i;
+  const shortContextualReply =
+    text.trim().split(/\s+/).length <= 12 &&
+    (/^(yes|no|yeah|yep|nope|sure|okay|ok|do it|go ahead|please)\b/i.test(text.trim()) || /\?\s*$/.test(lastAssistant.trim()));
+
+  // Only speculate on turns that look informational and side-effect free. The
+  // capture request still runs; if it finds a mutation, this draft is discarded
+  // and regenerated against the updated state.
+  return !actionOrStateTerms.test(text) && !shortContextualReply && !/(?:[$€£]|\b\d+(?:[.,]\d+)?\b)/.test(text);
+}
+
+async function requestReplyContent(
+  userText: string,
+  attachmentNote: string,
+  notes: string[],
+  deps: AgentDeps,
+  allowStreaming: boolean
+): Promise<string> {
+  deps.setWorking('Thinking…');
+  const history = deps.messages.slice(-16).map((m) => ({
+    role: m.role === 'assistant' ? 'assistant' : 'user',
+    content: s(m.content, 900),
+  }));
+  const noteBlock = notes.length
+    ? `\n\n[System notes — true facts about THIS turn, invisible to the student:\n${notes.map((n) => `- ${n}`).join('\n')}]`
+    : '';
+  const userContent = (attachmentNote ? `${userText}\n\n[System note: ${attachmentNote}]` : userText) + noteBlock;
+  let lastStreamedReply = '';
+  const lastAssistantText = [...history].reverse().find((message) => message.role === 'assistant')?.content || '';
+  const actionTerms = /\b(add|move|remove|shortlist|dream|target|safe|saved|skip)\b/i;
+  const shortConfirmation = /^(yes|yeah|yep|sure|okay|ok|do it|go ahead|please)\b/i.test(userText.trim());
+  const streamSafe =
+    allowStreaming &&
+    !!deps.onReplyDelta &&
+    !actionTerms.test(userText) &&
+    !(shortConfirmation && actionTerms.test(lastAssistantText));
+  const res = await llmChat(
+    [
+      { role: 'system', content: buildSystemPrompt(deps) },
+      ...history,
+      { role: 'user', content: userContent },
+    ],
+    {
+      temperature: 0.4,
+      maxTokens: 1800,
+      ...(streamSafe
+        ? {
+            onDelta: (_chunk: string, accumulated: string) => {
+              const next = extractReplyPrefix(accumulated);
+              if (next === lastStreamedReply) return;
+              lastStreamedReply = next;
+              deps.onReplyDelta?.(next);
+            },
+          }
+        : {}),
+    }
+  );
+  return res.content;
+}
+
 export async function runAgentTurn(userText: string, attachmentNote: string, deps: AgentDeps): Promise<AgentTurnResult> {
   const turn = newTurnFlags();
   turn.resumeParsed = /parsed as a resume/i.test(attachmentNote);
   const actionLines: string[] = [];
   const notes: string[] = [];
 
+  // For clearly informational turns, overlap the reply request with the
+  // deterministic capture request. If capture discovers any side effect, the
+  // speculative draft is discarded and regenerated from the updated state.
+  const speculativeReply: Promise<ReplyAttempt> | null = shouldSpeculateReply(userText, attachmentNote, deps)
+    ? requestReplyContent(userText, attachmentNote, [], deps, false).then(
+        (content) => ({ content }),
+        (error) => ({ error })
+      )
+    : null;
+
   // 1) Deterministic capture: answers/preferences are saved no matter what the
   //    chat model later does or fails to do.
   let cap: CapturedState | null = null;
   try {
     cap = await extractStateUpdates(userText, deps);
-  } catch {
+  } catch (error) {
+    rethrowAgentApiError(error);
     cap = null;
   }
   if (cap) {
@@ -909,7 +1178,8 @@ export async function runAgentTurn(userText: string, attachmentNote: string, dep
       const lines = await applyStateCapture(cap, deps, turn);
       actionLines.push(...lines);
       if (lines.length) notes.push(`Already saved this turn (state is updated — never ask permission or re-confirm): ${lines.join('; ')}.`);
-    } catch {
+    } catch (error) {
+      rethrowAgentApiError(error);
       // saving failed; the responder can still handle the message
     }
   }
@@ -919,26 +1189,31 @@ export async function runAgentTurn(userText: string, attachmentNote: string, dep
     const doc = latestResumeDoc(deps.documents);
     if (doc?.url) {
       deps.setWorking(`Re-reading ${doc.name}…`);
-      const line = await parseResumePdf(doc.url, doc.name, deps).catch(() => null);
-      if (line) {
-        actionLines.push(line);
+      const result = await parseResumePdf(doc.url, doc.name, deps);
+      if (result.status === 'complete' || result.status === 'partial') {
+        actionLines.push(result.message);
         turn.resumeParsed = true;
         const p = deps.profile;
         notes.push(
-          `You JUST re-read the student's resume (${doc.name}) and updated their Profile from it. It now has ${p.education.length} education item(s), ${p.work.length} work item(s), ${p.skills.length} skill(s), ${p.research.length} research item(s), ${p.extracurriculars.length} extracurricular(s). Tell them what was filled in — do NOT apologize about resume access.`
+          result.status === 'complete'
+            ? `You JUST re-read the student's resume (${doc.name}) and updated their Profile from it. It now has ${p.education.length} education item(s), ${p.work.length} work item(s), ${p.skills.length} skill(s), ${p.research.length} research item(s), ${p.extracurriculars.length} extracurricular(s). Tell them what was filled in — do NOT apologize about resume access.`
+            : result.stage === 'bio'
+              ? `You re-read ${doc.name} and saved its factual Profile details, but the AI summary refresh is still pending: ${result.reason}. Say that clearly without claiming the entire refresh completed.`
+              : `You re-read ${doc.name} and updated the Profile, but the search setup refresh failed: ${result.reason}. Say that clearly without implying the Profile update failed.`
         );
+      } else if (result.status === 'not-resume') {
+        notes.push(`${doc.name} was analyzed but does not appear to be a resume.`);
       } else {
-        notes.push(
-          `You tried to re-read ${doc.name} just now but could not extract details from it. Say that honestly and ask the student to re-upload their resume PDF here in chat.`
-        );
+        notes.push(`You tried to re-read ${doc.name}, but resume processing failed: ${result.error}. Ask the student to re-upload it.`);
       }
     } else {
       notes.push('The student references a resume but none is on file. Ask them to attach their resume PDF here in chat.');
     }
   }
 
-  // 3) Program search — runs BEFORE the reply so the reply reports real results.
-  //    Triggers: an explicit ask, or a preference change once search-ready.
+  // 3) Program search — runs only after intake is complete and before the
+  //    reply so the reply reports real results.
+  const intakeReady = intakeCompleted(deps.intake);
   const readiness = searchReadiness(deps);
   const searchAsked = !!cap?.wantsSearch || wantsProgramSearch(userText);
   const prefsChanged = turn.capturedKeys.some((k) => PREF_KEYS.includes(k));
@@ -958,22 +1233,27 @@ export async function runAgentTurn(userText: string, attachmentNote: string, dep
       // enforcement is best-effort
     }
   }
-  const autoSearch = prefsChanged && readiness.ok && (hasActivePrograms || haveCoreFour(deps));
-  if (searchAsked || autoSearch) {
-    if (readiness.ok || s(cap?.searchCriteria?.university, 120)) {
-      deps.setWorking('Searching the web for programs…');
-      let result: { added: number; reason?: string };
-      try {
-        result = await discoverPrograms(cap?.searchCriteria || {}, deps);
-      } catch {
-        result = { added: 0, reason: 'the search service was unreachable' };
-      }
+
+  const autoSearch =
+    turn.intakeCompletedThisTurn ||
+    (!!deps.retryingConnectionIssue && intakeReady && !hasActivePrograms) ||
+    (prefsChanged && readiness.ok && (hasActivePrograms || haveCoreFour(deps)));
+  if (!turn.searchRan && (searchAsked || autoSearch)) {
+    if (intakeReady) {
+      deps.setWorking('Searching official university sites…');
+      const result = await discoverPrograms(
+        cap?.searchCriteria || {},
+        deps,
+        { unlimited: turn.intakeCompletedThisTurn }
+      );
       turn.searchRan = true;
       if (result.added > 0) {
         deps.onProgramsDiscovered?.();
-        actionLines.push(`Searched the web and added ${result.added} new program${result.added === 1 ? '' : 's'} to your Recommendations`);
+        actionLines.push(
+          `Searched the web and added ${result.added} new program${result.added === 1 ? '' : 's'} to your Recommendations${result.caveat ? ` — ${result.caveat}` : ''}`
+        );
         notes.push(
-          `A live web search JUST COMPLETED and added ${result.added} new program(s) to the student's Recommendations (right panel). Report this in past tense and invite them to review — do not say a search is starting.`
+          `A live web search JUST COMPLETED and added ${result.added} new program(s) to the student's Recommendations (right panel). ${result.caveat ? `Required caveat: ${result.caveat}` : 'The programs were grounded in official university sources.'} Report this in past tense and invite them to review — do not say a search is starting.`
         );
       } else {
         actionLines.push(`Searched the web — no new matching programs found${result.reason ? ` (${result.reason})` : ''}`);
@@ -983,34 +1263,25 @@ export async function runAgentTurn(userText: string, attachmentNote: string, dep
       }
     } else {
       notes.push(
-        `The student wants program recommendations, but required information is missing: ${readiness.missing.join(', ')}. DO NOT claim a search is running or coming. Ask for the missing information (one question).`
+        `The student wants program recommendations, but intake is not complete. DO NOT run or promise a search. Continue the intake by asking exactly the next unanswered question.`
       );
     }
   }
 
-  // 4) The reply.
-  deps.setWorking('Thinking…');
-  const history = deps.messages.slice(-16).map((m) => ({
-    role: m.role === 'assistant' ? 'assistant' : 'user',
-    content: s(m.content, 900),
-  }));
-  const noteBlock = notes.length
-    ? `\n\n[System notes — true facts about THIS turn, invisible to the student:\n${notes.map((n) => `- ${n}`).join('\n')}]`
-    : '';
-  const userContent = (attachmentNote ? `${userText}\n\n[System note: ${attachmentNote}]` : userText) + noteBlock;
-
+  // 4) The reply. A speculative draft is valid only when every deterministic
+  // stage confirmed this was a no-op turn; otherwise generate against the
+  // freshly updated state and this turn's factual notes.
   let content = '';
   try {
-    const res = await llmChat(
-      [
-        { role: 'system', content: buildSystemPrompt(deps) },
-        ...history,
-        { role: 'user', content: userContent },
-      ],
-      { temperature: 0.4, maxTokens: 1800 }
-    );
-    content = res.content;
-  } catch {
+    if (speculativeReply && !turn.stateChanged && !notes.length && !actionLines.length) {
+      const attempt = await speculativeReply;
+      if (attempt.error) throw attempt.error;
+      content = attempt.content || '';
+    } else {
+      content = await requestReplyContent(userText, attachmentNote, notes, deps, true);
+    }
+  } catch (error) {
+    rethrowAgentApiError(error);
     // The deterministic work above already happened; report it honestly.
     return { reply: fallbackReply(deps, dedupeLines(actionLines)), actionLines: dedupeLines(actionLines) };
   }
@@ -1025,17 +1296,58 @@ export async function runAgentTurn(userText: string, attachmentNote: string, dep
     reply = rescueReply(content) || content.replace(/```json|```/g, '').trim();
   }
 
+  const programActionTypes = new Set([
+    'add_to_shortlist',
+    'move_program',
+    'remove_from_shortlist',
+    'set_program_status',
+  ]);
+  const programActionLines: string[] = [];
   for (const action of actions) {
     if (!action || typeof action.type !== 'string') continue;
     try {
       const lines = await executeAction(action, deps, turn);
       actionLines.push(...lines);
-    } catch {
-      actionLines.push(`Couldn't complete an action (${String(action.type).replace(/_/g, ' ')}) — please try again`);
+      if (programActionTypes.has(action.type)) programActionLines.push(...lines);
+    } catch (error) {
+      rethrowAgentApiError(error);
+      const failure = `Couldn't complete an action (${String(action.type).replace(/_/g, ' ')}) — please try again`;
+      actionLines.push(failure);
+      if (programActionTypes.has(action.type)) programActionLines.push(failure);
     } finally {
       deps.setWorking('Thinking…');
     }
   }
+  // The model drafts before mutations execute. Replace any premature claim
+  // with the actual confirmed database result after every requested action.
+  if (programActionLines.length) {
+    reply = programActionLines.some((line) => /^Couldn't|not on the shortlist/i.test(line))
+      ? programActionLines.join('\n')
+      : `Done — ${programActionLines.join('. ')}.`;
+  }
+
+  let completionSearchReply = '';
+  if (turn.intakeCompletedThisTurn && !turn.searchRan && intakeCompleted(deps.intake)) {
+    deps.setWorking('Searching official university sites…');
+    const result = await discoverPrograms({}, deps, { unlimited: true });
+    turn.searchRan = true;
+    if (result.added > 0) {
+      deps.onProgramsDiscovered?.();
+      actionLines.push(
+        `Searched the web and added ${result.added} new program${result.added === 1 ? '' : 's'} to your Recommendations${result.caveat ? ` — ${result.caveat}` : ''}`
+      );
+      completionSearchReply =
+        `I also completed your program search and added ${result.added} new program${result.added === 1 ? '' : 's'} to your Recommendations.${result.caveat ? ` ${result.caveat}` : ''}`;
+    } else {
+      actionLines.push(
+        `Searched the web — no new matching programs found${result.reason ? ` (${result.reason})` : ''}`
+      );
+      completionSearchReply =
+        `I also completed your program search, but found no new matching programs${result.reason ? ` because ${result.reason}` : ''}.`;
+    }
+    deps.setWorking('Thinking…');
+  }
+  if (completionSearchReply) reply = `${reply.trim()}\n\n${completionSearchReply}`.trim();
 
   // 5) Stall guard: a reply that promises background work while nothing ran is
   //    rewritten once, then replaced with a deterministic honest reply.
@@ -1044,11 +1356,13 @@ export async function runAgentTurn(userText: string, attachmentNote: string, dep
     let rewritten = '';
     try {
       rewritten = await rewriteStalledReply(reply, finalLines, deps);
-    } catch {
+    } catch (error) {
+      rethrowAgentApiError(error);
       rewritten = '';
     }
     reply = rewritten || fallbackReply(deps, finalLines);
   }
+  reply = reply.replace(/^\s*Search running:.*(?:\n|$)/gim, '').trim();
   if (!reply.trim()) reply = fallbackReply(deps, finalLines);
 
   return { reply, actionLines: finalLines };
@@ -1100,12 +1414,8 @@ function violationFor(
       };
     }
   }
-  if (deadlineStatus(p.deadline || '') === 'past') {
-    return {
-      option: "The program doesn't match my expectations",
-      note: `Moved automatically: the application deadline (${p.deadline}) has already passed.`,
-    };
-  }
+  // Past-cycle deadlines are warnings, not a reason to hide an otherwise
+  // relevant program. The UI and chat label them for 2027 verification.
   return null;
 }
 
@@ -1133,6 +1443,7 @@ export async function enforcePreferencesOnPrograms(deps: AgentDeps): Promise<str
     if (!violation) continue;
     try {
       await deps.setStatus(p.id, 'skipped', { reasons: [violation.option], note: violation.note });
+      p.status = 'skipped';
       moved++;
     } catch {
       // keep checking the rest
@@ -1245,6 +1556,9 @@ const COUNTRY_SYNONYMS: Record<string, string[]> = {
   australia: ['australia', 'australian'],
   germany: ['germany', 'german'],
   france: ['france', 'french'],
+  portugal: ['portugal', 'portuguese'],
+  brazil: ['brazil', 'brazilian'],
+  'south africa': ['south africa', 'south african'],
   netherlands: ['netherlands', 'holland', 'dutch'],
   singapore: ['singapore'],
   'hong kong': ['hong kong'],
@@ -1278,22 +1592,50 @@ function normText(x: string): string {
     .trim();
 }
 
-function prefCountries(text: string): string[] {
-  const t = ` ${normText(text)} `;
+let intlCountryNamesCache: string[] | null = null;
+
+function intlCountryNames(): string[] {
+  if (intlCountryNamesCache) return intlCountryNamesCache;
+  const DisplayNames = (Intl as any).DisplayNames;
+  if (typeof DisplayNames !== 'function') {
+    intlCountryNamesCache = [];
+    return intlCountryNamesCache;
+  }
+
+  const displayNames = new DisplayNames(['en'], { type: 'region' });
+  const names = new Set<string>();
+  for (let first = 65; first <= 90; first++) {
+    for (let second = 65; second <= 90; second++) {
+      const code = String.fromCharCode(first, second);
+      const label = displayNames.of(code);
+      const normalized = normText(typeof label === 'string' ? label : '');
+      if (!normalized || normalized === code.toLowerCase() || normalized === 'unknown region') continue;
+      names.add(normalized);
+    }
+  }
+  intlCountryNamesCache = [...names].sort((a, b) => b.length - a.length);
+  return intlCountryNamesCache;
+}
+
+function countriesInText(text: string): string[] {
+  const normalized = ` ${normText(text)} `;
+  if (!normalized.trim()) return [];
   const out: string[] = [];
-  for (const [canon, syns] of Object.entries(COUNTRY_SYNONYMS)) {
-    if (syns.some((syn) => t.includes(` ${syn} `))) out.push(canon);
+  for (const [canon, synonyms] of Object.entries(COUNTRY_SYNONYMS)) {
+    if (synonyms.some((synonym) => normalized.includes(` ${normText(synonym)} `))) out.push(canon);
+  }
+  for (const country of intlCountryNames()) {
+    if (normalized.includes(` ${country} `) && !out.includes(country)) out.push(country);
   }
   return out;
 }
 
+function prefCountries(text: string): string[] {
+  return countriesInText(text);
+}
+
 function canonicalCountry(raw: string): string {
-  const t = ` ${normText(raw)} `;
-  if (!t.trim()) return '';
-  for (const [canon, syns] of Object.entries(COUNTRY_SYNONYMS)) {
-    if (syns.some((syn) => t.includes(` ${syn} `))) return canon;
-  }
-  return '';
+  return countriesInText(raw)[0] || '';
 }
 
 const DISPLAY_COUNTRY: Record<string, string> = {
@@ -1331,6 +1673,9 @@ function prefCities(text: string): string[] {
     .filter(Boolean);
   const out: string[] = [];
   for (const chunk of chunks) {
+    // A chunk containing a recognized country is a country constraint, not a
+    // city: prose such as "country preference: UK" must not infer "preference".
+    if (canonicalCountry(chunk)) continue;
     const words = chunk
       .replace(/[^a-z0-9\s]/g, ' ')
       .split(/\s+/)
@@ -1395,28 +1740,17 @@ const MONTH_INDEX: Record<string, number> = {
   jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
 };
 
-const SEASON_MONTH: Record<string, number> = { spring: 2, summer: 5, fall: 8, autumn: 8, winter: 0 };
 
 export function deadlineStatus(text: string, now = new Date()): 'future' | 'past' | 'unknown' {
   const t = (text || '').toLowerCase();
   if (!t.trim()) return 'unknown';
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const dates: number[] = [];
-  let sawExplicit = false;
-
   const pushMonthDay = (monthName: string, dayStr: string, yearStr?: string) => {
     const m = MONTH_INDEX[monthName.slice(0, 3)];
     const d = parseInt(dayStr, 10);
-    if (m == null || !(d >= 1 && d <= 31)) return;
-    if (yearStr) {
-      dates.push(new Date(parseInt(yearStr, 10), m, d).getTime());
-    } else {
-      // No year stated → the next occurrence of that month/day (upcoming cycle).
-      const cand = new Date(now.getFullYear(), m, d);
-      if (cand.getTime() < today) cand.setFullYear(now.getFullYear() + 1);
-      dates.push(cand.getTime());
-    }
-    sawExplicit = true;
+    if (m == null || !(d >= 1 && d <= 31) || !yearStr) return;
+    dates.push(new Date(parseInt(yearStr, 10), m, d).getTime());
   };
 
   let m: RegExpExecArray | null;
@@ -1427,21 +1761,10 @@ export function deadlineStatus(text: string, now = new Date()): 'future' | 'past
   const iso = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
   while ((m = iso.exec(t))) {
     dates.push(new Date(parseInt(m[1], 10), parseInt(m[2], 10) - 1, parseInt(m[3], 10)).getTime());
-    sawExplicit = true;
   }
   const slash = /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g;
   while ((m = slash.exec(t))) {
     dates.push(new Date(parseInt(m[3], 10), parseInt(m[1], 10) - 1, parseInt(m[2], 10)).getTime());
-    sawExplicit = true;
-  }
-  const season = /(fall|autumn|spring|summer|winter)\s*(?:of\s*)?(\d{4})/gi;
-  while ((m = season.exec(t))) {
-    dates.push(new Date(parseInt(m[2], 10), SEASON_MONTH[m[1]] ?? 8, 1).getTime());
-    sawExplicit = true;
-  }
-  if (!sawExplicit) {
-    const yearOnly = /\b(20\d{2})\b/g;
-    while ((m = yearOnly.exec(t))) dates.push(new Date(parseInt(m[1], 10), 11, 31).getTime());
   }
   if (!dates.length) return 'unknown';
   return dates.some((d) => d >= today) ? 'future' : 'past';
@@ -1465,7 +1788,7 @@ const UNIVERSITY_NAME_STOPWORDS = new Set([
 // (.edu, .ac.xx, .edu.xx) or a host that carries the university's name/acronym.
 function isAcademicHost(host: string, university: string): boolean {
   if (!host) return false;
-  if (/\.edu$|\.edu\.[a-z]{2,3}$|\.ac\.[a-z]{2,3}$/.test(host)) return true;
+  if (/\.edu$|\.edu\.[a-z]{2,3}$|\.ac\.[a-z]{2,3}$|\.ac\.uk$/i.test(host)) return true;
   const words = normText(university)
     .split(' ')
     .filter((w) => w.length > 1 && !UNIVERSITY_NAME_STOPWORDS.has(w));
@@ -1559,9 +1882,29 @@ function normalizedUrl(url: string): string {
   try {
     const u = new URL(url);
     u.hash = '';
+    for (const key of [...u.searchParams.keys()]) {
+      if (/^utm_/i.test(key) || /^(fbclid|gclid)$/i.test(key)) u.searchParams.delete(key);
+    }
     return u.toString().replace(/\/$/, '').toLowerCase();
   } catch {
     return '';
+  }
+}
+
+function programOverviewUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    u.hash = '';
+    for (const key of [...u.searchParams.keys()]) {
+      if (/^utm_/i.test(key) || /^(fbclid|gclid)$/i.test(key)) u.searchParams.delete(key);
+    }
+    const detailSegments = /^(admissions?|apply|application|requirements?|curriculum|courses?|fees?|tuition(?:-and-aid|-aid)?|cost(?:-aid-scholarships)?(?:\.php)?|financial-aid|deadlines?|faq|people|faculty)$/i;
+    const parts = u.pathname.split('/').filter(Boolean);
+    while (parts.length > 1 && detailSegments.test(parts[parts.length - 1])) parts.pop();
+    u.pathname = `/${parts.join('/')}${parts.length ? '/' : ''}`;
+    return u.toString().replace(/\/$/, '');
+  } catch {
+    return url;
   }
 }
 
@@ -1640,7 +1983,8 @@ function cleanSourcedFact(value: unknown, evidence: string, kind: 'tuition' | 'd
     return tests.length && tests.some((test) => evidence.includes(test.toLowerCase())) ? text : '';
   }
   const hasDate = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|fall|spring|summer|winter|\d{1,2}\/\d{1,2}|\d{4})\b/i.test(text);
-  return hasDate && hasFactCue(evidence, kind) && text.toLowerCase().split(/\s+/).some((token) => token.length > 3 && evidence.includes(token))
+  const hasCycleYear = /\b20\d{2}\b/.test(text);
+  return hasDate && hasCycleYear && hasFactCue(evidence, kind) && text.toLowerCase().split(/\s+/).some((token) => token.length > 3 && evidence.includes(token))
     ? text
     : '';
 }
@@ -1654,7 +1998,6 @@ interface PendingProgram {
   location: string;
   website: string;
   summaryFallback: string;
-  fit_reasons: FitReason[];
   hit: ProgramHit;
   extra: ProgramHit[];
 }
@@ -1677,37 +2020,98 @@ function ownSiteEvidence(p: PendingProgram, pool: ProgramHit[]): string {
   return ownSiteHits(p, pool).map(hitText).join(' ').toLowerCase();
 }
 
-// Targeted site-scoped searches so tuition/deadline/duration facts have real
-// evidence to be verified against (snippets from generic queries rarely do).
-async function expandProgramEvidence(pending: PendingProgram[]): Promise<void> {
+// Targeted site-scoped searches give the enrichment LLM official evidence for
+// both factual fields and genuinely program-specific fit reasons.
+async function fetchOfficialPageEvidence(url: string): Promise<ProgramHit[]> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(url, { signal: controller.signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
+    if (!res.ok) return [];
+    const contentType = res.headers.get('content-type') || '';
+    if (!/text\/html|application\/xhtml\+xml/i.test(contentType)) return [];
+    const html = await res.text();
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    doc.querySelectorAll('script,style,noscript,svg').forEach((node) => node.remove());
+    const text = (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) return [];
+    return [{ title: doc.title || 'Official program page', link: res.url || url, snippet: text.slice(0, 12000) }];
+  } catch {
+    // Many university sites disallow browser CORS. Site-scoped search below
+    // remains the official-source fallback when the direct page cannot open.
+    return [];
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+async function expandProgramEvidence(pending: PendingProgram[], unlimited = false): Promise<void> {
   const year = new Date().getFullYear();
+  const nextYear = year + 1;
+  const candidates = unlimited ? pending : pending.slice(0, 6);
   await Promise.all(
-    pending.slice(0, 6).map(async (p) => {
+    candidates.map(async (p) => {
+      const initialHost = hostOf(p.website);
+      if (!initialHost) return;
+      const tokens = meaningfulProgramTokens(p.program_name).slice(0, 5).join(' ');
+      const search = (query: string, limit: number) =>
+        webSearch(query, limit).catch((error) => {
+          rethrowAgentApiError(error);
+          return [] as ProgramHit[];
+        });
+
+      // Step 1: identify the official overview page with an exact site query.
+      const overviewHits = await search(`site:${initialHost} "${p.program_name}" official program overview`, 6);
+      const overview = overviewHits.find((hit) =>
+        isLikelyProgramPageHit(hit, { program_name: p.program_name }, p.degree_type.toLowerCase().includes('bachelor') ? 'undergraduate' : 'graduate')
+      );
+      if (overview?.link) {
+        p.hit = overview;
+        p.website = programOverviewUrl(overview.link);
+      } else {
+        p.website = programOverviewUrl(p.website);
+      }
+
+      // Step 2: open the selected page, then collect exact-host evidence.
       const host = hostOf(p.website);
       if (!host) return;
-      const tokens = meaningfulProgramTokens(p.program_name).slice(0, 4).join(' ');
-      try {
-        const [fees, deadlines] = await Promise.all([
-          webSearch(`site:${host} ${tokens} tuition fees cost`, 5),
-          webSearch(`site:${host} ${tokens} application deadline admissions ${year}`, 5),
-        ]);
-        p.extra = [...fees, ...deadlines].filter((h) => h.link && sameSite(p.website, h.link));
-      } catch {
-        p.extra = [];
-      }
+      const [page, fees, deadlines, academics, differentiators] = await Promise.all([
+        fetchOfficialPageEvidence(p.website),
+        search(`site:${host} ${tokens} tuition fees cost`, 4),
+        search(`site:${host} ${tokens} application deadline admissions "${year}" OR "${nextYear}"`, 5),
+        search(`site:${host} ${tokens} faculty research curriculum modules cohort "class size"`, 5),
+        search(`site:${host} ${tokens} "placement year" internship "exchange partner" "study abroad" "alumni network" careers`, 5),
+      ]);
+      p.extra = [...page, ...overviewHits, ...fees, ...deadlines, ...academics, ...differentiators].filter(
+        (h) => h.link && sameSite(p.website, h.link)
+      );
     })
   );
 }
 
 async function extractProgramFacts(
   pending: PendingProgram[],
-  pool: ProgramHit[]
-): Promise<Record<number, { tuition: string; deadline: string; tests: string; gpa: string; duration: string; summary: string }>> {
+  pool: ProgramHit[],
+  studentContext: string
+): Promise<
+  Record<
+    number,
+    {
+      tuition: string;
+      deadline: string;
+      tests: string;
+      gpa: string;
+      duration: string;
+      summary: string;
+      fit_reasons: FitReason[];
+    }
+  >
+> {
   const blocks = pending
     .map((p, i) => {
       const lines = ownSiteHits(p, pool)
-        .slice(0, 10)
-        .map((h, j) => `${j + 1}. ${s(h.title, 140)} — ${s(h.snippet, 260)}`)
+        .slice(0, 24)
+        .map((h, j) => `${j + 1}. ${s(h.title, 140)} — ${s(h.snippet, 1200)}`)
         .join('\n');
       return `PROGRAM ${i} — ${p.university} | ${p.program_name}\nEvidence from the university's own pages:\n${lines || '(no additional evidence)'}`;
     })
@@ -1718,17 +2122,28 @@ async function extractProgramFacts(
       {
         role: 'system',
         content:
-          "You extract university program facts STRICTLY from each program's own evidence snippets. Never guess, estimate, or carry facts across programs. Return ONLY valid JSON.",
+          "You extract university program facts and personalized fit reasons STRICTLY from each program's own evidence snippets and the supplied student context. Never guess, estimate, fabricate, or carry program facts across programs. Return ONLY valid JSON.",
       },
       {
         role: 'user',
-        content: `Today's date: ${new Date().toDateString()}.\n\n${blocks}\n\nReturn ONLY JSON:\n{"programs":[{"index":0,"tuition":"","deadline":"","tests":"","gpa":"","duration":"","summary":""}]}\n\nRules per program: fill a field ONLY when the exact value appears in THAT program's evidence, else leave it "". tuition/gpa/duration must quote the exact figures. deadline: only an application deadline for an UPCOMING intake (in the future relative to today) — if the only deadlines visible are already past, leave "". tests: only test names explicitly mentioned (GRE, GMAT, TOEFL, IELTS, Duolingo, SAT, ACT), including waiver notes. summary: 3-4 informative sentences about the program using only sourced facts (what it covers, format, department, outcomes) — no placeholders like "check website".`,
+        content: `Today's date: ${new Date().toDateString()}.\n\nStudent context:\n${studentContext}\n\n${blocks}\n\nReturn ONLY JSON:\n{"programs":[{"index":0,"tuition":"","deadline":"","tests":"","gpa":"","duration":"","summary":"","fit_reasons":[{"title":"Student connection","detail":""},{"title":"Program detail","detail":""},{"title":"Genuine differentiator","detail":""}]}]}\n\nRules per program: fill a factual field ONLY when the exact value appears in THAT program's evidence, else leave it "". tuition/gpa/duration must quote the exact figures. deadline: the exact application deadline with its year. Prefer an upcoming deadline, but if the only explicitly dated application deadline is from a past cycle, return it so the system can label it as historical. Leave it empty when the cycle/year is not explicit. tests: only test names explicitly mentioned (GRE, GMAT, TOEFL, IELTS, Duolingo, SAT, ACT), including waiver notes. summary: 3-4 informative sentences using only sourced facts — no placeholders like "check website".\n\nReturn exactly three fit_reasons only when all three can be supported:\n- "Student connection": connect one supplied student fact, goal, preference, or constraint to one supported feature of this program, addressing the student as "you".\n- "Program detail": state one concrete supported detail such as faculty/research focus, curriculum, course structure, cohort size, or class size.\n- "Genuine differentiator": state one supported non-generic feature such as a placement year, named exchange partner, campus culture evidence, or industry-specific alumni network. Never call something unique, best, leading, or the only one unless the evidence says so.\nIf the evidence cannot support all three reasons, return "fit_reasons":[] for that program. Never fabricate a missing connection, detail, or differentiator.`,
       },
     ],
-    { temperature: 0.1, maxTokens: 2400 }
+    { temperature: 0.1, maxTokens: 3600 }
   );
   const parsed = extractJson(res.content);
-  const out: Record<number, { tuition: string; deadline: string; tests: string; gpa: string; duration: string; summary: string }> = {};
+  const out: Record<
+    number,
+    {
+      tuition: string;
+      deadline: string;
+      tests: string;
+      gpa: string;
+      duration: string;
+      summary: string;
+      fit_reasons: FitReason[];
+    }
+  > = {};
   for (const item of asArr<any>(parsed?.programs)) {
     const idx = Number(item?.index);
     if (!Number.isInteger(idx) || idx < 0 || idx >= pending.length) continue;
@@ -1739,19 +2154,113 @@ async function extractProgramFacts(
       gpa: s(item?.gpa, 120),
       duration: s(item?.duration, 120),
       summary: s(item?.summary, 620),
+      fit_reasons: normalizeFitReasons(item?.fit_reasons),
     };
   }
   return out;
 }
 
-export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps): Promise<{ added: number; reason?: string }> {
+interface DiscoveryResult {
+  added: number;
+  reason?: string;
+  caveat?: string;
+}
+
+interface DiscoveryOptions {
+  unlimited?: boolean;
+}
+
+async function addKnowledgeFallback(
+  criteria: SearchCriteria,
+  deps: AgentDeps,
+  searchReason: string,
+  options: DiscoveryOptions = {}
+): Promise<DiscoveryResult> {
+  const majors = s(criteria.focus, 160) || knownMajors(deps);
+  const university = s(criteria.university, 120);
+  const locations = s(criteria.locations, 160) || knownLocations(deps);
+  const level = resolveSearchLevel(criteria, deps);
+  const budget = s(criteria.budget, 80) || knownBudget(deps);
+  const count: number | null = options.unlimited ? null : 5;
+  if (!majors && !university) return { added: 0, reason: searchReason };
+
+  try {
+    const res = await llmChat(
+      [
+        {
+          role: 'system',
+          content:
+            'You suggest established university programs from general knowledge when live official-site search is incomplete. Return ONLY valid JSON. Never include tuition, deadlines, cohort sizes, test averages, acceptance rates, rankings, or any other numerical facts.',
+        },
+        {
+          role: 'user',
+          content: `${count === null ? 'Suggest every relevant program supported by the available information' : `Suggest up to ${count} relevant programs`} for this student.\nField: ${majors || 'open'}\nUniversity restriction: ${university || 'none'}\nLevel: ${level || 'open'}\nLocation: ${locations || 'open'}\nBudget preference: ${budget || 'not stated'}\nAlready shown: ${deps.programs.map((p) => `${p.university} — ${p.program_name}`).join('; ') || 'none'}\n\nReturn ONLY JSON: {"programs":[{"university":"","program_name":"","degree_type":"","location":"","why_relevant":"one cautious sentence based only on the program title, level, location, and the student's stated goal"}]}. Do not invent URLs or statistics.`,
+        },
+      ],
+      { maxTokens: 1000 }
+    );
+    const parsed = extractJson(res.content);
+    const targetCountries = prefCountries(locations);
+    const targetCities = prefCities(locations);
+    const existing = new Set(deps.programs.map((p) => `${p.university}|${p.program_name}`.toLowerCase()));
+    const items: NewProgram[] = [];
+    for (const raw of asArr<any>(parsed?.programs)) {
+      const universityName = s(raw?.university, 140);
+      const programName = s(raw?.program_name, 180);
+      const degreeType = s(raw?.degree_type, 80);
+      const location = s(raw?.location, 120);
+      const requestedUniversity = normText(university);
+      const candidateUniversity = normText(universityName);
+      if (
+        requestedUniversity &&
+        !candidateUniversity.includes(requestedUniversity) &&
+        !requestedUniversity.includes(candidateUniversity)
+      ) continue;
+      const levelText = `${programName} ${degreeType}`;
+      if (level === 'graduate' && !isGraduateText(levelText)) continue;
+      if (level === 'undergraduate' && isGraduateText(levelText) && !isUndergraduateText(levelText)) continue;
+      const country = canonicalCountry(location);
+      if (targetCountries.length && (!country || !targetCountries.includes(country))) continue;
+      if (targetCities.length && !cityMatches(normText(location), targetCities)) continue;
+      const key = `${universityName}|${programName}`.toLowerCase();
+      if (!universityName || !programName || existing.has(key)) continue;
+      existing.add(key);
+      items.push({
+        university: universityName,
+        program_name: programName,
+        degree_type: degreeType,
+        location,
+        summary: 'Based on what I know — verify specific details on the official site.',
+        fit_reasons: [],
+      });
+      if (count !== null && items.length >= count) break;
+    }
+    if (!items.length) return { added: 0, reason: searchReason };
+    const added = await deps.addPrograms(items);
+    return added > 0
+      ? {
+          added,
+          caveat: `Live official-site evidence was incomplete (${searchReason}). Based on what I know — verify specific details on the official site. Budget limits are not treated as verified without an official tuition figure.`,
+        }
+      : { added: 0, reason: searchReason };
+  } catch (error) {
+    rethrowAgentApiError(error);
+    return { added: 0, reason: searchReason };
+  }
+}
+
+export async function discoverPrograms(
+  criteria: SearchCriteria,
+  deps: AgentDeps,
+  options: DiscoveryOptions = {}
+): Promise<DiscoveryResult> {
   const answers = deps.intake.answers || {};
   const majors = s(criteria.focus, 160) || knownMajors(deps);
   const level = resolveSearchLevel(criteria, deps);
   const locations = s(criteria.locations, 160) || knownLocations(deps);
   const budgetPref = s(criteria.budget, 80) || knownBudget(deps);
   const university = s(criteria.university, 120);
-  const count = Math.min(Math.max(Number(criteria.count) || 5, 1), 8);
+  const count: number | null = options.unlimited ? null : 5;
 
   if (!majors && !university) {
     return { added: 0, reason: 'I need at least a field of study or a university to search for' };
@@ -1761,7 +2270,6 @@ export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps
   }
 
   const today = new Date();
-  const year = today.getFullYear();
   const targetCountries = prefCountries(locations);
   const targetCities = prefCities(locations);
   const budgetMax = parseBudgetMaxUsd(budgetPref);
@@ -1770,28 +2278,30 @@ export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps
 
   const queries = university
     ? [
-        `${university} ${majors} ${levelTerms} official program page admission requirements`,
-        `${university} ${majors} ${levelTerms} degree tuition deadline ${year}`,
+        `site:.edu "${university}" "${majors}" ${levelTerms} official program`,
+        `"${university}" "${majors}" ${levelTerms} official university program overview`,
       ]
     : [
-        `${majors} ${levelTerms} official university program page ${cityText} admission requirements`,
-        `${majors} ${levelTerms} university program ${locations} tuition application deadline ${year}`,
-        ...(targetCountries.includes('united states') ? [`${majors} ${levelTerms} program site:.edu ${cityText}`] : []),
+        `site:.edu "${majors}" ${levelTerms} "${cityText}" official program`,
+        `site:.ac.uk "${majors}" ${levelTerms} "${cityText}" official program`,
+        `${majors} ${levelTerms} official university program "${locations}"`,
+        ...(targetCountries.includes('united states') ? [`site:.edu "${majors}" ${levelTerms} "${cityText}" tuition`] : []),
       ];
 
   const hits: ProgramHit[] = [];
   for (const q of queries) {
-    const results = await webSearch(q, 8);
+    const results = await webSearch(q, 10);
     for (const r of results) {
-      if (r.link && !hits.some((h) => h.link === r.link)) hits.push(r);
+      const key = normalizedUrl(s(r.link, 300));
+      if (key && !hits.some((h) => normalizedUrl(s(h.link, 300)) === key)) hits.push(r);
     }
   }
   if (!hits.length) {
-    return { added: 0, reason: 'I could not find reliable web results for that search' };
+    return addKnowledgeFallback(criteria, deps, 'live official-site search returned no results', options);
   }
 
-  const evidence = hits
-    .slice(0, 20)
+  const evidenceHits = options.unlimited ? hits : hits.slice(0, 20);
+  const evidence = evidenceHits
     .map((h, i) => `${i + 1}. ${s(h.title, 140)} — ${s(h.snippet, 240)} [${s(h.link, 200)}]`)
     .join('\n');
 
@@ -1806,8 +2316,7 @@ export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps
     university ? `Restrict to university: ${university}` : '',
     `Other priorities: ${answers.priorities || '—'}`,
     `Post-study goals: ${answers.outcomes || '—'}`,
-    `Student profile highlights: ${s(deps.profile.bio, 300) || s(deps.profile.headline, 150) || '—'}`,
-    `Education from profile: ${educationText(deps.profile) || '—'}`,
+    `Student profile for personalized fit reasoning: ${s(profileForPrompt(deps.profile), 3000) || 'Not yet specified'}`,
   ]
     .filter(Boolean)
     .join('\n');
@@ -1819,17 +2328,18 @@ export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps
         {
           role: 'system',
           content:
-            'You turn live web search results into structured university program candidates for a specific student. Only include programs directly supported by the provided search results. Never invent programs or facts. Return ONLY valid JSON.',
+            'You identify structured university program candidates for a specific student from live web search results. Reason outward from this student’s full stated profile, goals, background, preferences, and constraints; do not begin with famous institutions and retrofit generic praise. Only include programs directly supported by the provided results. Never invent programs or facts. Do not generate fit reasons in this stage; candidate-specific fit reasons are generated later from expanded official-site evidence. Return ONLY valid JSON.',
         },
         {
           role: 'user',
-          content: `Today's date: ${today.toDateString()}.\n\nStudent preferences:\n${prefs}\n\nLive web search results:\n${evidence}\n\nAlready recommended to this student (do NOT repeat any of these):\n${existing || '(none)'}\n\nReturn ONLY JSON:\n{"programs":[{"university":"","program_name":"","degree_type":"","city":"","country":"","metro_area":"","website":"https://official-university-program-page","summary":"1-2 sentence description from the search results","fit_reasons":[{"title":"","detail":""},{"title":"","detail":""}]}],"reason":"fill ONLY if programs is empty — a short plain-language reason why nothing matched"}\n\nRules: up to ${count + 3} candidates, best fit first. The website field MUST be an official university program page URL copied exactly from the search results — never a course catalogue, aggregator, PDF, social media page, forum, or news article. "country" is the campus country. If allowed countries are listed, EVERY candidate must be in one of them — no exceptions. If preferred cities are listed, only include programs whose campus is in or immediately around one of those cities, and set "metro_area" to that city (e.g. Cambridge → metro_area "Boston"; Stanford → metro_area "San Francisco"); otherwise leave metro_area "". If the requested level is graduate/postgraduate, omit bachelor/undergraduate programs (and vice versa). If a max budget is listed, omit programs whose tuition is known to exceed it. Omit programs whose application deadlines for the upcoming intake have already passed. fit_reasons must reference THIS student's stated goals, preferences, or profile, and must not mention affordability, GPA, tests, or deadlines.`,
+          content: `Today's date: ${today.toDateString()}.\n\nStudent preferences:\n${prefs}\n\nLive web search results:\n${evidence}\n\nAlready recommended to this student (do NOT repeat any of these):\n${existing || '(none)'}\n\nReturn ONLY JSON:\n{"programs":[{"university":"","program_name":"","degree_type":"","city":"","country":"","metro_area":"","website":"https://official-university-program-page","summary":"1-2 sentence description from the search results"}],"reason":"fill ONLY if programs is empty — a short plain-language reason why nothing matched"}\n\nRules: ${count === null ? 'return every supported candidate available in the supplied results' : `up to ${count + 3} candidates`}, best fit first. The website field MUST be an official university program page URL copied exactly from the search results — never a course catalogue, aggregator, PDF, social media page, forum, or news article. "country" is the campus country. If allowed countries are listed, EVERY candidate must be in one of them — no exceptions. If preferred cities are listed, only include programs whose campus is in or immediately around one of those cities, and set "metro_area" to that city (e.g. Cambridge → metro_area "Boston"; Stanford → metro_area "San Francisco"); otherwise leave metro_area "". If the requested level is graduate/postgraduate, omit bachelor/undergraduate programs (and vice versa). If a max budget is listed, omit programs whose tuition is known to exceed it. Do not omit an otherwise relevant program solely because the only sourced deadline is from a past cycle; preserve that deadline so the system can label it as historical.\n\nDo not generate fit_reasons in this candidate-discovery stage. Candidate-specific reasons are generated only after official-site evidence has been expanded.`,
         },
       ],
       { temperature: 0.2, maxTokens: 2400 }
     );
     parsed = extractJson(res.content);
-  } catch {
+  } catch (error) {
+    rethrowAgentApiError(error);
     return { added: 0, reason: 'the search service was unreachable' };
   }
 
@@ -1845,7 +2355,7 @@ export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps
     // Link policy: must be a real hit, on the university's own academic host.
     const programHit = findProgramPageHit(raw, hits, level);
     if (!programHit?.link) continue;
-    const website = s(programHit.link, 300);
+    const website = programOverviewUrl(s(programHit.link, 300));
     const host = hostOf(website);
     if (isBannedHost(website) || !isAcademicHost(host, uni)) continue;
 
@@ -1879,24 +2389,29 @@ export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps
       location: [city, country].filter(Boolean).join(', '),
       website,
       summaryFallback: s(raw?.summary, 400),
-      fit_reasons: normalizeFitReasons(raw?.fit_reasons),
       hit: programHit,
       extra: [],
     });
-    if (pending.length >= count + 2) break;
+    if (count !== null && pending.length >= count + 2) break;
   }
 
   if (!pending.length) {
-    return { added: 0, reason: s(parsed?.reason, 240) || 'no real programs matched those criteria' };
+    return addKnowledgeFallback(
+      criteria,
+      deps,
+      s(parsed?.reason, 240) || 'official results did not include a usable program overview page',
+      options
+    );
   }
 
   // Enrich: site-scoped evidence → verified facts (richer cards, no guesses).
   deps.setWorking('Checking fees, deadlines, and details…');
-  await expandProgramEvidence(pending);
+  await expandProgramEvidence(pending, options.unlimited === true);
   let facts: Awaited<ReturnType<typeof extractProgramFacts>> = {};
   try {
-    facts = await extractProgramFacts(pending, hits);
-  } catch {
+    facts = await extractProgramFacts(pending, hits, prefs);
+  } catch (error) {
+    rethrowAgentApiError(error);
     facts = {};
   }
 
@@ -1911,11 +2426,15 @@ export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps
     let deadline = cleanSourcedFact(f?.deadline, ev, 'deadline');
     const duration = cleanSourcedFact(f?.duration, ev, 'duration');
 
-    // Fresh-programs policy: a verified deadline that has already passed
-    // disqualifies the program; an unknown deadline is allowed.
+    // Keep relevant programs even when the only sourced deadline is from a
+    // past cycle, but label it so nobody mistakes it for a currently open one.
     const status = deadlineStatus(deadline, today);
-    if (status === 'past') continue;
-    if (status === 'unknown' && deadline && !/\d/.test(deadline)) deadline = '';
+    const deadlineYears = (deadline.match(/\b20\d{2}\b/g) || []).map(Number);
+    const staleCycle = status === 'past' || (status === 'unknown' && deadlineYears.length > 0 && Math.max(...deadlineYears) <= today.getFullYear());
+    if (staleCycle) {
+      deadline = `${deadline} (past cycle — check the official site for ${today.getFullYear() + 1} intake dates)`;
+    }
+    if (status === 'unknown' && !deadlineYears.length) deadline = '';
 
     // Budget policy: verified tuition above the stated budget disqualifies.
     if (budgetMax) {
@@ -1923,13 +2442,58 @@ export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps
       if (amounts.length && Math.min(...amounts) > budgetMax * 1.05) continue;
     }
 
-    const fitReasons = p.fit_reasons.filter((reason) => {
+    const programEvidence = ev.replace(/,/g, '');
+    const studentEvidence = [
+      majors,
+      level,
+      locations,
+      budgetPref,
+      ...Object.values(answers),
+      profileForPrompt(deps.profile),
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+      .replace(/,/g, '');
+    const combinedEvidence = `${programEvidence} ${studentEvidence}`;
+    const studentWords = new Set(normText(studentEvidence).split(/\s+/));
+    const programWords = new Set(normText(programEvidence).split(/\s+/));
+
+    const fitReasons = normalizeFitReasons(f?.fit_reasons).filter((reason) => {
+      const title = reason.title.toLowerCase();
       const detail = `${reason.title} ${reason.detail}`.toLowerCase();
       if (!tuition && /\b(tuition|budget|afford|cost|fee|scholarship)\b/.test(detail)) return false;
       if (!gpa && /\b(gpa|grade)\b/.test(detail)) return false;
       if (!tests && /\b(gre|gmat|toefl|ielts|sat|act|test)\b/.test(detail)) return false;
-      return true;
+
+      if (title === 'student connection') {
+        const connectionWords = normText(reason.detail)
+          .split(/\s+/)
+          .filter(
+            (word) =>
+              word.length > 3 &&
+              !/^(your|this|that|with|from|into|program|university|student|degree|course|study|studies|aligns|matches|offers|provides|strong|good|fit)$/.test(word)
+          );
+        return (
+          bulletSupported(reason.detail, combinedEvidence) &&
+          connectionWords.some((word) => studentWords.has(word)) &&
+          connectionWords.some((word) => programWords.has(word))
+        );
+      }
+
+      if (title === 'program detail' || title === 'genuine differentiator') {
+        return bulletSupported(reason.detail, programEvidence);
+      }
+
+      return false;
     });
+
+    const fitTitles = new Set(fitReasons.map((reason) => reason.title.toLowerCase()));
+    const fullySupportedFit = ['student connection', 'program detail', 'genuine differentiator'].every((title) =>
+      fitTitles.has(title)
+    )
+      ? fitReasons
+      : [];
 
     items.push({
       university: p.university,
@@ -1942,14 +2506,19 @@ export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps
       gpa,
       duration,
       website: p.website,
-      summary: s(f?.summary, 620) || p.summaryFallback,
-      fit_reasons: fitReasons,
+      summary: cleanSourcedSummary(f?.summary, ev) || cleanSourcedSummary(p.summaryFallback, ev),
+      fit_reasons: fullySupportedFit,
     });
-    if (items.length >= count) break;
+    if (count !== null && items.length >= count) break;
   }
 
   if (!items.length) {
-    return { added: 0, reason: s(parsed?.reason, 240) || 'no programs passed your location, budget, and deadline requirements' };
+    return addKnowledgeFallback(
+      criteria,
+      deps,
+      s(parsed?.reason, 240) || 'official results did not provide enough verified detail',
+      options
+    );
   }
 
   const added = await deps.addPrograms(items);
@@ -1967,6 +2536,20 @@ export async function discoverPrograms(criteria: SearchCriteria, deps: AgentDeps
 
 // Numbers, currency figures, and test names in a bullet must literally appear
 // in the evidence; prose bullets need meaningful word overlap with it.
+function cleanSourcedSummary(value: unknown, evidenceBlob: string): string {
+  const text = s(value, 620);
+  if (!text) return '';
+  const evidence = evidenceBlob.toLowerCase().replace(/,/g, '');
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => {
+      const numbers = sentence.toLowerCase().replace(/,/g, '').match(/\d+(?:\.\d+)?/g) || [];
+      return numbers.every((number) => evidence.includes(number));
+    })
+    .join(' ')
+    .trim();
+}
+
 function bulletSupported(text: string, evidenceBlob: string): boolean {
   const t = text.toLowerCase();
   const numbers = t.replace(/,/g, '').match(/\d+(?:\.\d+)?/g) || [];
@@ -2133,7 +2716,7 @@ const RESUME_JSON_SHAPE = `{"is_resume": true|false,
 
 const RESUME_PROMPT = `You are parsing a document that may be a resume/CV. Return ONLY valid JSON, no other text:
 ${RESUME_JSON_SHAPE}
-If the document is NOT a resume/CV, return {"is_resume": false}. Extract EVERY section present — education, work experience, skills, research/publications, extracurriculars/volunteering/leadership, certifications (use misc). Mark degrees still being earned with inProgress=true and endYear as the expected year. Do not invent missing grades, test scores, dates, employers, or fields.`;
+If the document is NOT a resume/CV, return {"is_resume": false}. Extract EVERY section present — education, work experience, skills, research/publications, extracurriculars/volunteering/leadership, certifications (use misc). An explicit education end date ALWAYS means inProgress=false, even if the degree title or surrounding prose sounds current; preserve the stated month and year in endYear. Use inProgress=true only when the resume literally says Present, Current, Ongoing, or gives no end date. Do not invent missing grades, test scores, dates, employers, or fields.`;
 
 async function structuredResumeExtract(resumeText: string): Promise<any | null> {
   const ask = async (extra: string) => {
@@ -2154,7 +2737,23 @@ async function structuredResumeExtract(resumeText: string): Promise<any | null> 
   return parsed;
 }
 
-export async function parseResumePdf(url: string, fileName: string, deps: AgentDeps, sourceFile?: File): Promise<string | null> {
+export type ResumeParseResult =
+  | { status: 'complete'; message: string }
+  | { status: 'partial'; stage: 'bio' | 'search'; message: string; reason: string }
+  | { status: 'not-resume'; message: string }
+  | { status: 'failure'; message: string; error: string };
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown processing error.';
+}
+
+export async function parseResumePdf(
+  url: string,
+  fileName: string,
+  deps: AgentDeps,
+  sourceFile?: File
+): Promise<ResumeParseResult> {
+  const expectedFactsKey = profileFactsKey(deps.profile);
   // Step 1 — get the document's full text (kept so Scout can always use it).
   let text = '';
   try {
@@ -2167,39 +2766,134 @@ export async function parseResumePdf(url: string, fileName: string, deps: AgentD
   // Step 2 — structured extraction (from the text when available; otherwise
   // fall back to one-shot document analysis like before).
   let parsed: any = null;
-  if (text) {
-    parsed = await structuredResumeExtract(text).catch(() => null);
-  }
+  if (text) parsed = await structuredResumeExtract(text).catch(() => null);
   if (!parsed) {
     try {
       parsed = extractJson(await analyzeDocument(url, RESUME_PROMPT, sourceFile));
     } catch {
-      return null;
+      return { status: 'failure', message: `Could not analyze ${fileName}`, error: 'Document analysis failed.' };
     }
   }
-  if (!parsed || parsed.is_resume === false) return null;
-
-  const incoming = normalizeProfilePatch(parsed, emptyProfile());
-  const merged = mergeResumeIntoProfile(deps.profile, incoming);
-  if (text) {
-    merged.resumeText = text;
-    merged.resumeSourceUrl = url;
-    merged.resumeParsedAt = new Date().toISOString();
+  if (!parsed || typeof parsed !== 'object') {
+    return { status: 'failure', message: `Could not parse ${fileName}`, error: 'The resume response was malformed.' };
+  }
+  if (parsed.is_resume === false) {
+    return { status: 'not-resume', message: `${fileName} does not appear to be a resume` };
+  }
+  if (parsed.is_resume !== true) {
+    return { status: 'failure', message: `Could not parse ${fileName}`, error: 'The resume response omitted its document classification.' };
   }
 
+  let incoming = normalizeProfilePatch(parsed, emptyProfile());
+  if (text) incoming = applyExplicitEducationDates(incoming, text);
+  const merged = mergeResumeIntoProfile(deps.profile, incoming);
+  if (text) merged.resumeText = text;
+  merged.resumeSourceUrl = url;
+  merged.resumeParsedAt = new Date().toISOString();
+
   deps.setWorking('Building your profile…');
-  const withSummaries = await generateProfileSummaries(merged, deps.intake);
-  await deps.saveProfile(withSummaries);
-  deps.profile = withSummaries;
-  const lines = await applyResumeSearchSignals(withSummaries, deps);
-  return lines.length
-    ? `Parsed ${fileName}, updated your Profile, and refreshed your search setup`
-    : `Parsed ${fileName} and updated your Profile`;
+  let withSummaries: ProfileData;
+  try {
+    withSummaries = await generateProfileSummaries(merged, deps.intake);
+  } catch (error) {
+    try {
+      const receipt = await deps.saveProfile(merged, { expectedFactsKey });
+      deps.profile = receipt.profile;
+      await applyResumeSearchSignals(receipt.profile, deps).catch(() => []);
+    } catch {
+      return {
+        status: 'failure',
+        message: `Could not save the profile extracted from ${fileName}`,
+        error: 'The Profile changed while the resume was being processed. Please re-read it to apply the latest version safely.',
+      };
+    }
+    return {
+      status: 'partial',
+      stage: 'bio',
+      message: `Parsed ${fileName} and saved its factual Profile details; Scout is still refreshing the Bio`,
+      reason: profileSummaryFailureMessage(error),
+    };
+  }
+
+  let savedProfile: ProfileData;
+  try {
+    const receipt = await deps.saveProfile(withSummaries, { bioAlreadyGenerated: true, expectedFactsKey });
+    savedProfile = receipt.profile;
+  } catch {
+    return {
+      status: 'failure',
+      message: `Could not save the profile extracted from ${fileName}`,
+      error: 'The Profile changed while the resume was being processed. Please re-read it to apply the latest version safely.',
+    };
+  }
+
+  deps.profile = savedProfile;
+  try {
+    const lines = await applyResumeSearchSignals(savedProfile, deps);
+    return {
+      status: 'complete',
+      message: lines.length
+        ? `Parsed ${fileName}, updated your Profile, and refreshed your search setup`
+        : `Parsed ${fileName} and updated your Profile`,
+    };
+  } catch (error) {
+    return {
+      status: 'partial',
+      stage: 'search',
+      message: `Parsed ${fileName} and updated your Profile, but could not refresh the search setup`,
+      reason: errorText(error),
+    };
+  }
 }
 
 // Resume data augments the profile; manual/chat edits already present are
 // kept. Re-parsing the same resume is idempotent: items that match an existing
 // entry replace it (fuller data wins) instead of duplicating it.
+function applyExplicitEducationDates(profile: ProfileData, resumeText: string): ProfileData {
+  const block = resumeText.match(/\bEDUCATION\b([\s\S]*?)(?=\n\s*(?:WORK EXPERIENCE|EXPERIENCE|EMPLOYMENT|PROJECTS?|SKILLS?|RESEARCH|CERTIFICATIONS?)\b|$)/i)?.[1] || '';
+  const month = '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)';
+  const date = `(?:${month}\\s+)?(?:19|20)\\d{2}`;
+  const range = new RegExp(`\\b(${date})\\s*[-–—]\\s*(${date}|Present|Current|Ongoing)\\b`, 'gi');
+  const ranges = [...block.matchAll(range)].map((match) => {
+    const offset = match.index || 0;
+    return {
+      start: match[1],
+      end: match[2],
+      context: normText(block.slice(Math.max(0, offset - 220), offset + match[0].length + 220)),
+    };
+  });
+  if (!ranges.length) return profile;
+  const unused = new Set(ranges.map((_, index) => index));
+  return {
+    ...profile,
+    education: profile.education.map((item, itemIndex) => {
+      const terms = [item.institute, item.degree, item.field]
+        .flatMap((value) => normText(value).split(/\s+/))
+        .filter((word) => word.length > 3);
+      let best = -1;
+      let bestScore = 0;
+      for (const index of unused) {
+        const score = terms.filter((term) => ranges[index].context.includes(term)).length;
+        if (score > bestScore) {
+          best = index;
+          bestScore = score;
+        }
+      }
+      if (best < 0 && ranges.length === profile.education.length && unused.has(itemIndex)) best = itemIndex;
+      if (best < 0) return item;
+      unused.delete(best);
+      const explicit = ranges[best];
+      const ongoing = /^(present|current|ongoing)$/i.test(explicit.end);
+      return {
+        ...item,
+        startYear: explicit.start,
+        endYear: ongoing ? '' : explicit.end,
+        inProgress: ongoing,
+      };
+    }),
+  };
+}
+
 function mergeResumeIntoProfile(current: ProfileData, incoming: ProfileData): ProfileData {
   const next: ProfileData = { ...current };
   if (!next.name && incoming.name) next.name = incoming.name;
@@ -2234,45 +2928,94 @@ function mergeResumeIntoProfile(current: ProfileData, incoming: ProfileData): Pr
 }
 
 // Generate the bio, "what you're looking for", and per-item Scout summaries.
-export async function generateProfileSummaries(profile: ProfileData, intake: IntakeData): Promise<ProfileData> {
+const PROFILE_SUMMARY_SYSTEM =
+  'You are Scout, a university-application advisor. Write crisp, personalized summaries grounded ONLY in the provided profile and chat data. Never infer or fabricate an unknown fact. For every unknown required profile-summary category, use the exact literal value "Not yet specified". Return ONLY valid JSON.';
+
+function profileSummaryContext(profile: ProfileData, intake: IntakeData): string {
   const answered = Object.entries(intake.answers || {})
-    .map(([k, v]) => `${k}: ${s(v, 200)}`)
+    .map(([key, value]) => `${key}: ${s(value, 200)}`)
     .join('\n');
-  try {
-    const res = await llmChat(
-      [
-        {
-          role: 'system',
-          content:
-            'You are Scout, a university-application advisor. Write crisp, specific, third-person-free summaries grounded ONLY in the provided data. Return ONLY valid JSON.',
-        },
-        {
-          role: 'user',
-          content: `Profile data:\n${JSON.stringify({ ...profile, bio: undefined, lookingFor: undefined, resumeText: undefined, resumeSourceUrl: undefined, resumeParsedAt: undefined })}\n\nWhat the student has shared in chat so far:\n${answered || '(nothing yet)'}\n\nReturn ONLY JSON:\n{"bio":"4-6 sentence bio built from their work experience, academics, skills, research and extracurriculars",\n "lookingFor":"2-4 sentences on what they seem to be looking for from higher education, based on what they've shared in chat (if they've shared nothing, infer cautiously from the resume trajectory)",\n "educationSummaries":["one 1-2 sentence highlight per education item, same order"],\n "workSummaries":["one per work item, same order"],\n "researchSummaries":["one per research item, same order"],\n "skillsSummary":"1-2 sentences on their most valuable skills",\n "extracurricularSummaries":["one per extracurricular item, same order"]}`,
-        },
-      ],
-      { temperature: 0.4, maxTokens: 1800 }
-    );
-    const parsed = extractJson(res.content);
-    if (!parsed) return profile;
-    const next: ProfileData = { ...profile };
-    if (typeof parsed.bio === 'string' && parsed.bio.trim()) next.bio = s(parsed.bio, 1200);
-    if (typeof parsed.lookingFor === 'string' && parsed.lookingFor.trim()) next.lookingFor = s(parsed.lookingFor, 1200);
-    if (typeof parsed.skillsSummary === 'string') next.skillsSummary = s(parsed.skillsSummary, 400);
-    function apply<T extends { aiSummary: string }>(items: T[], summaries: any): T[] {
-      return items.map((item, i) => ({
-        ...item,
-        aiSummary: typeof summaries?.[i] === 'string' && summaries[i].trim() ? s(summaries[i], 400) : item.aiSummary,
-      }));
-    }
-    next.education = apply(next.education, parsed.educationSummaries);
-    next.work = apply(next.work, parsed.workSummaries);
-    next.research = apply(next.research, parsed.researchSummaries);
-    next.extracurriculars = apply(next.extracurriculars, parsed.extracurricularSummaries);
-    return next;
-  } catch {
-    return profile;
+  return `Profile factual data:\n${JSON.stringify(profileFactsForBio(profile))}\n\nSaved program level:\n${intake.programLevel || 'Not yet specified'}\n\nWhat the student has shared in chat so far:\n${answered || '(nothing yet)'}`;
+}
+
+async function requestProfileSummaryJson(
+  profile: ProfileData,
+  intake: IntakeData,
+  request: string,
+  maxTokens: number
+): Promise<Record<string, any>> {
+  const res = await llmChat(
+    [
+      { role: 'system', content: PROFILE_SUMMARY_SYSTEM },
+      { role: 'user', content: `${profileSummaryContext(profile, intake)}\n\n${request}` },
+    ],
+    { temperature: 0.4, maxTokens }
+  );
+  const parsed = extractJson(res.content);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('malformed_profile_summary');
   }
+  return parsed;
+}
+
+function requiredGeneratedBio(parsed: Record<string, any>): string {
+  if (typeof parsed.bio !== 'string' || !parsed.bio.trim()) throw new Error('empty_generated_bio');
+  return s(parsed.bio, 1200);
+}
+
+export function profileSummaryFailureCode(error: unknown): string {
+  if (isAgentApiError(error)) return `ai_${error.kind}`;
+  const message = errorText(error);
+  if (message.includes('malformed_profile_summary')) return 'malformed_response';
+  if (message.includes('empty_generated_bio')) return 'empty_bio';
+  return 'generation_failed';
+}
+
+function profileSummaryFailureMessage(error: unknown): string {
+  const code = profileSummaryFailureCode(error);
+  if (code === 'empty_bio' || code === 'malformed_response') return 'Scout returned an invalid summary response.';
+  if (code === 'ai_timeout' || code === 'ai_network') return 'The AI service could not be reached.';
+  return 'The Profile summary could not be generated.';
+}
+
+export async function generateProfileBio(profile: ProfileData, intake: IntakeData): Promise<string> {
+  const parsed = await requestProfileSummaryJson(
+    profile,
+    intake,
+    `Return ONLY JSON:\n{"bio":"4-6 sentences covering the student's supported academic and professional background, skills, research, and extracurriculars without inventing missing facts"}`,
+    650
+  );
+  return requiredGeneratedBio(parsed);
+}
+
+// Resume parsing keeps its existing combined one-shot pass for Bio, lookingFor,
+// skills, and per-item summaries; ordinary Profile edits request only the Bio.
+export async function generateProfileSummaries(profile: ProfileData, intake: IntakeData): Promise<ProfileData> {
+  const parsed = await requestProfileSummaryJson(
+    profile,
+    intake,
+    `Return ONLY JSON:\n{"bio":"4-6 sentences covering the student's supported academic and professional background, skills, research, and extracurriculars without inventing missing facts",\n "lookingFor":"Academic background: <supported value or Not yet specified>\\nTarget level: <supported value or Not yet specified>\\nField(s): <supported value or Not yet specified>\\nPreferred locations: <supported value or Not yet specified>\\nBudget: <supported value or Not yet specified>\\nVisa constraints: <supported value or Not yet specified>\\nLanguage constraints: <supported value or Not yet specified>\\nPersonal constraints: <supported value or Not yet specified>",\n "educationSummaries":["one grounded 1-2 sentence highlight per education item, same order"],\n "workSummaries":["one grounded summary per work item, same order"],\n "researchSummaries":["one grounded summary per research item, same order"],\n "skillsSummary":"1-2 grounded sentences on their most valuable skills",\n "extracurricularSummaries":["one grounded summary per extracurricular item, same order"]}\n\nFor lookingFor, preserve all eight labels in exactly that order. Fill a category only when the supplied data supports it. Use exactly "Not yet specified" for an unknown value; do not infer preferences or constraints from career trajectory, nationality, location, or education.`,
+    1800
+  );
+
+  const next: ProfileData = { ...profile, bio: requiredGeneratedBio(parsed) };
+  if (typeof parsed.lookingFor === 'string' && parsed.lookingFor.trim()) next.lookingFor = s(parsed.lookingFor, 1200);
+  if (typeof parsed.skillsSummary === 'string') next.skillsSummary = s(parsed.skillsSummary, 400);
+  function apply<T extends { aiSummary: string }>(items: T[], summaries: unknown): T[] {
+    const values = Array.isArray(summaries) ? summaries : [];
+    return items.map((item, index) => ({
+      ...item,
+      aiSummary:
+        typeof values[index] === 'string' && values[index].trim()
+          ? s(values[index], 400)
+          : item.aiSummary,
+    }));
+  }
+  next.education = apply(next.education, parsed.educationSummaries);
+  next.work = apply(next.work, parsed.workSummaries);
+  next.research = apply(next.research, parsed.researchSummaries);
+  next.extracurriculars = apply(next.extracurriculars, parsed.extracurricularSummaries);
+  return next;
 }
 
 // Rebuild the "What you're looking for" summary from the chat-stated answers.
@@ -2284,17 +3027,22 @@ async function regenerateLookingFor(intake: IntakeData, profile: ProfileData): P
   try {
     const res = await llmChat(
       [
-        { role: 'system', content: 'You are Scout, a university-application advisor. Return ONLY valid JSON like {"lookingFor":"..."}.' },
+        {
+          role: 'system',
+          content:
+            'You are Scout, a university-application advisor. Use ONLY the supplied data. Never infer or fabricate an unknown fact. Use the exact literal value "Not yet specified" for every unknown required category. Return ONLY valid JSON like {"lookingFor":"..."}.',
+        },
         {
           role: 'user',
-          content: `Based on what this student has shared in our chat:\n${answered}\n\nProfile headline: ${s(profile.headline, 150) || '—'}\n\nWrite 2-4 sentences describing what they are looking for from higher education — level, fields, locations, budget posture, and what matters most to them. Return ONLY {"lookingFor":"..."}.`,
+          content: `Profile data:\n${profileForPrompt(profile)}\n\nSaved program level:\n${intake.programLevel || 'Not yet specified'}\n\nWhat this student has shared in chat:\n${answered}\n\nReturn ONLY {"lookingFor":"Academic background: <supported value or Not yet specified>\\nTarget level: <supported value or Not yet specified>\\nField(s): <supported value or Not yet specified>\\nPreferred locations: <supported value or Not yet specified>\\nBudget: <supported value or Not yet specified>\\nVisa constraints: <supported value or Not yet specified>\\nLanguage constraints: <supported value or Not yet specified>\\nPersonal constraints: <supported value or Not yet specified>"}.\n\nPreserve all eight labels in exactly that order. Fill a category only when the supplied data supports it. Do not infer preferences or constraints from career trajectory, nationality, location, or education.`,
         },
       ],
       { temperature: 0.4, maxTokens: 320 }
     );
     const parsed = extractJson(res.content);
     return typeof parsed?.lookingFor === 'string' ? s(parsed.lookingFor, 1200) : '';
-  } catch {
+  } catch (error) {
+    rethrowAgentApiError(error);
     return '';
   }
 }

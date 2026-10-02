@@ -40,6 +40,11 @@ export interface StudentSnapshot {
   headline: string;
   location: string;
   citizenship: string;
+  citizenshipCountries?: Array<{ country_code: string; country_name: string; status: 'citizen' | 'permanent_resident' | 'neither' }>;
+  programmeInterests?: string[];
+  apprenticeshipOptIn?: boolean;
+  apprenticeshipEligibleCountries?: string[];
+  internationalOnly?: boolean;
   level: string; // the level of study the student is seeking
   gpaContext: string; // e.g. "MSc Management — London Business School"
   education: { institute: string; degree: string; field: string; grade: string; inProgress: boolean }[];
@@ -271,7 +276,7 @@ export const BUCKET_DEFS: {
     dotClass: 'bg-emerald-500',
     labelClass: 'text-emerald-700',
     chipClass: 'bg-emerald-50 border-emerald-100 text-emerald-900',
-    addClass: 'border-emerald-200 bg-emerald-50/40 hover:border-emerald-400 text-emerald-700/70',
+    addClass: 'border-emerald-200 bg-emerald-50/40 hover:border-emerald-400 text-emerald-700',
   },
   {
     key: 'good',
@@ -279,7 +284,7 @@ export const BUCKET_DEFS: {
     dotClass: 'bg-lime-500',
     labelClass: 'text-lime-700',
     chipClass: 'bg-lime-50 border-lime-100 text-lime-900',
-    addClass: 'border-lime-200 bg-lime-50/40 hover:border-lime-400 text-lime-700/70',
+    addClass: 'border-lime-200 bg-lime-50/40 hover:border-lime-400 text-lime-700',
   },
   {
     key: 'borderline',
@@ -287,7 +292,7 @@ export const BUCKET_DEFS: {
     dotClass: 'bg-amber-500',
     labelClass: 'text-amber-700',
     chipClass: 'bg-amber-50 border-amber-100 text-amber-900',
-    addClass: 'border-amber-200 bg-amber-50/40 hover:border-amber-400 text-amber-700/70',
+    addClass: 'border-amber-200 bg-amber-50/40 hover:border-amber-400 text-amber-700',
   },
   {
     key: 'notAFit',

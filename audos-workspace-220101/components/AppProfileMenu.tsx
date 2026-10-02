@@ -11,12 +11,30 @@ export function logoutUser(spaceId: string, setSessionId: (id: string | null) =>
     localStorage.removeItem(`space_session_${spaceId}`);
     localStorage.removeItem(`space_role_${spaceId}`);
   } catch {}
-  setSessionId(null as unknown as string);
+  setSessionId(null);
+
+  // A real navigation cancels in-flight session checks and prevents stale app,
+  // auth, or bfcache state from restoring the user immediately after logout.
+  if (window.location.hostname === 'app.scoutandalma.com') {
+    window.location.replace('https://www.scoutandalma.com/');
+    return;
+  }
+
   const url = new URL(window.location.href);
   url.searchParams.delete('app');
+  url.searchParams.delete('role');
+  url.searchParams.delete('auth');
   url.hash = '';
-  let path = url.pathname.replace(/\/$/, '') || '';
-  const authSuffixes = ['/auth', '/student/signin', '/student/signup', '/university/signin', '/university/signup'];
+  let path = url.pathname.replace(/\/+$/, '') || '';
+  const authSuffixes = [
+    '/auth',
+    '/student/signin',
+    '/student/signup',
+    '/university/signin',
+    '/university/signup',
+    '/company/signin',
+    '/company/signup',
+  ];
   for (const suffix of authSuffixes) {
     if (path.endsWith(suffix)) {
       path = path.slice(0, -suffix.length) || '';
@@ -25,7 +43,7 @@ export function logoutUser(spaceId: string, setSessionId: (id: string | null) =>
   }
   url.pathname = path || '/';
   url.searchParams.set('_v', String(Date.now()));
-  window.history.replaceState({ view: 'landing', gateVersion: 114 }, '', url.pathname + url.search);
+  window.location.replace(url.toString());
 }
 
 export default function AppProfileMenu({ roleLabel }: AppProfileMenuProps) {

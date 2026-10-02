@@ -18,7 +18,7 @@ import {
   X,
 } from 'lucide-react';
 import { cn, tw, typography } from '../../lib/colors';
-import { researchProgramDetails } from './scout-agent';
+import { deadlineStatus, researchProgramDetails } from './scout-agent';
 import { fetchProgramDetails, persistProgramDetails, useScout } from './scout-store';
 import {
   FitReason,
@@ -38,7 +38,7 @@ function universityLogoUrl(website?: string | null): string {
   if (!website) return '';
   try {
     const host = new URL(website).hostname;
-    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=64`;
+    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=32`;
   } catch {
     return '';
   }
@@ -71,14 +71,28 @@ function cleanDisplayFact(value?: string | null): string {
   return text;
 }
 
+function cleanDeadlineFact(value?: string | null): string {
+  const text = cleanDisplayFact(value);
+  if (!text || /past cycle/i.test(text)) return text;
+  const currentYear = new Date().getFullYear();
+  const years = (text.match(/\b20\d{2}\b/g) || []).map(Number);
+  const staleCycle =
+    deadlineStatus(text) === 'past' ||
+    (deadlineStatus(text) === 'unknown' && years.length > 0 && Math.max(...years) <= currentYear);
+  return staleCycle
+    ? `${text} (past cycle — check the official site for ${currentYear + 1} intake dates)`
+    : text;
+}
+
 // Compact verified-fact chips for list rows (only facts that survived the
 // evidence checks are stored, so whatever exists here is safe to show).
 function ProgramFactChips({ program }: { program: ProgramRow }) {
   const chips = [
-    program.degree_type,
+    program.program_type === 'apprenticeship' ? 'Apprenticeship' : program.degree_type,
+    program.country_name,
     cleanDisplayFact(program.duration),
     cleanDisplayFact(program.tuition),
-    cleanDisplayFact(program.deadline) ? `Apply by ${cleanDisplayFact(program.deadline)}` : '',
+    cleanDeadlineFact(program.deadline) ? `Apply by ${cleanDeadlineFact(program.deadline)}` : '',
   ]
     .map((c) => (c || '').trim())
     .filter(Boolean)
@@ -335,10 +349,12 @@ function VerifiedDetails({ program }: { program: ProgramRow }) {
 export function ProgramDetailBody({ program }: { program: ProgramRow }) {
   const fitReasons = asArr<FitReason>(program.fit_reasons as any);
   const facts: { label: string; value?: string | null }[] = [
-    { label: 'Degree', value: program.degree_type },
+    { label: 'Programme type', value: program.program_type === 'apprenticeship' ? 'Apprenticeship' : program.degree_type },
+    { label: program.program_type === 'apprenticeship' ? 'Employer' : 'Institution', value: program.company_name || program.university },
+    { label: 'Eligible country', value: program.country_name },
     { label: 'Duration', value: cleanDisplayFact(program.duration) },
     { label: 'Tuition', value: cleanDisplayFact(program.tuition) },
-    { label: 'Application deadline', value: cleanDisplayFact(program.deadline) },
+    { label: 'Application deadline', value: cleanDeadlineFact(program.deadline) },
     { label: 'Tests', value: cleanDisplayFact(program.tests) },
     { label: 'GPA threshold', value: cleanDisplayFact(program.gpa) },
   ];
@@ -388,6 +404,12 @@ export function ProgramDetailBody({ program }: { program: ProgramRow }) {
         <p className={`mt-4 text-[15px] leading-relaxed whitespace-pre-line ${typography.color.primary}`}>
           <LinkText text={program.summary} />
         </p>
+      )}
+      {program.eligibility_notes && (
+        <div className="mt-4 rounded-xl border border-[var(--space-brand-primary-200)] bg-[var(--space-brand-primary-50)] px-3.5 py-3">
+          <p className={`text-xs font-semibold ${typography.color.brand}`}>Eligibility context</p>
+          <p className={`mt-1 text-sm leading-relaxed ${typography.color.secondary}`}>{program.eligibility_notes}</p>
+        </div>
       )}
 
       {/* Program section */}

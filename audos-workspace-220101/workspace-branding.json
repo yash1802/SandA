@@ -7,8 +7,8 @@
   },
   "name": "Scout & Alma",
   "tagline": "Talk to Scout. Recruit with Alma. Match for life.",
-  "logoUrl": "https://storage.googleapis.com/audos-images/brand-logos/770c41cc-8152-454b-a962-31f3575efe68.png",
-  "iconUrl": "https://storage.googleapis.com/audos-images/brand-logos/770c41cc-8152-454b-a962-31f3575efe68.png",
+  "logoUrl": "https://storage.googleapis.com/audos-images/chat-attachments/8e8874c3-8ca0-4043-ad99-87e4dd177c41.png",
+  "iconUrl": "https://storage.googleapis.com/audos-images/chat-attachments/8e8874c3-8ca0-4043-ad99-87e4dd177c41.png",
   "colors": {
     "primary": "#31a1b4",
     "highlight": "#e32626",
@@ -136,14 +136,14 @@
     }
   },
   "typography": {
-    "font": "Space Grotesk",
+    "font": "Chakra Petch",
     "category": "sans-serif",
     "weights": [
       400,
       700
     ],
-    "headingFont": "Space Grotesk",
-    "bodyFont": "Space Grotesk"
+    "headingFont": "Chakra Petch",
+    "bodyFont": "Chakra Petch"
   },
-  "heroVideoUrl": "https://storage.googleapis.com/audos-images/generated-videos/openrouter-OZapXrskGoJz4c9Ns6G0-1781651353255.mp4"
+  "heroVideoUrl": "https://storage.googleapis.com/remotioncloudrun-29i6x7bt7e/renders/demo-1787769500024-mup4bznz/out.mp4"
 }

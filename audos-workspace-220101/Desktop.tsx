@@ -1,4 +1,4 @@
-import { useState, Suspense, LazyExoticComponent, ComponentType, useEffect, useRef, Component, ErrorInfo, ReactNode } from 'react';
+import { useState, Suspense, LazyExoticComponent, ComponentType, useEffect, useLayoutEffect, useRef, Component, ErrorInfo, ReactNode } from 'react';
 import { Bot, Folder, X, Minus, Activity, Moon, Heart, Calendar, Users, FileText, BarChart, Settings as SettingsIcon, ArrowUp, MessageCircle, ChevronUp, Plane, TrendingUp, LineChart, Dumbbell, Brain, Target, Zap, Star, Clock, CheckCircle, List, BookOpen, Coffee, Music, Camera, MapPin, Wallet, ShoppingCart, Gift, Lightbulb, Sparkles, Rocket, Home, Building, Globe, Mail, Phone, Video, Mic, Image, Play, Pause, Volume2, Wifi, Cloud, Sun, Umbrella, Thermometer, Wind, Droplets, Leaf, Flower2, Mountain, Waves, Compass, Map, Navigation, Car, Bike, Ship, Award, Trophy, Medal, Crown, Diamond, Gem, Key, Lock, Unlock, Shield, Eye, Search, Filter, SortAsc, Download, Upload, Share2, Link, ExternalLink, Copy, Clipboard, ClipboardList, Trash2, Edit, Pencil, PenTool, Scissors, Bookmark, Flag, Bell, AlertCircle, Info, HelpCircle, XCircle, CheckCircle2, Circle, Square, Triangle, Hexagon, Octagon, Hash, AtSign, DollarSign, Percent, Calculator, Code, Terminal, Database, Server, Cpu, Monitor, Smartphone, Tablet, Laptop, Watch, Headphones, Speaker, Radio, Tv, Printer, Scan, QrCode, Barcode, CreditCard, Receipt, Banknote, PiggyBank, TrendingDown, AreaChart, PieChart, GraduationCap, Radar } from 'lucide-react';
 import type { SpaceConfig, DesktopBranding, DesktopThemeTokens } from './types';
 import { useSpaceRuntime } from './SpaceRuntimeContext';
@@ -6,6 +6,7 @@ import AgentChat from './components/AgentChat';
 import FileBrowser from './components/FileBrowser';
 import EmailGate from './components/EmailGate';
 import Settings from './components/Settings';
+import SupportWidget from './components/SupportWidget';
 import { tw } from './lib/colors';
 
 // Role-based app visibility. Students and universities get COMPLETELY separate
@@ -15,11 +16,12 @@ import { tw } from './lib/colors';
 const ROLE_APP_IDS: Record<string, string[]> = {
   student: ['fit-shortlist'],
   university: ['prospect-radar'],
+  company: ['prospect-radar'],
 };
 const VALID_ROLES = Object.keys(ROLE_APP_IDS);
 const PUBLIC_SURVEY_APP_IDS = new Set(['student-survey', 'university-survey']);
 
-const DESKTOP_VERSION = 3;
+const DESKTOP_VERSION = 4;
 
 // Hook to detect mobile vs desktop using JS (prevents double-mounting of components)
 function useIsMobile() {
@@ -267,6 +269,12 @@ export default function SpaceDesktop({
   const { sessionId, isBootstrappingSession, trackEvent, subscriptionReady, setSessionId } = useSpaceRuntime();
   const isMobile = useIsMobile(); // JS-based media query to prevent double-mounting AgentChat
 
+  // The compiled space HTML is platform-generated, so set the root document
+  // language at runtime for screen readers and browser language features.
+  useEffect(() => {
+    document.documentElement.lang = 'en';
+  }, []);
+
   // ── Role-based segregation ──────────────────────────────────────────────
   // The user's role (student vs. university) is chosen at sign-up (EmailGate)
   // and persisted in localStorage. It determines which app they land on and
@@ -427,6 +435,8 @@ export default function SpaceDesktop({
 
   // Track whether hash change was triggered internally (to avoid minimizing agent on UI navigation)
   const isInternalHashChange = useRef(false);
+  // Preserve a valid URL deep link while the customer session and role are restored.
+  const pendingDeepLink = useRef<string | null>(null);
   // Track if initial window setup has been done (to prevent deep link handler from re-running)
   const hasInitialized = useRef(false);
   // Track if space_entered has been tracked to avoid duplicates
@@ -511,12 +521,23 @@ export default function SpaceDesktop({
 
   // Handle URL hash-based deep linking and set default window (ONLY on initial mount)
   useEffect(() => {
+    // Cache a valid hash before any session/role guard can return. Post-auth
+    // history normalization rewrites the URL, so the hash cannot be recovered later.
+    const hash = window.location.hash.slice(1).toLowerCase();
+    const matchingDeepLinkedApp = hash
+      ? config.apps.find(
+          app => app.id.toLowerCase() === hash || app.name.toLowerCase() === hash
+        )
+      : undefined;
+    if (matchingDeepLinkedApp) {
+      pendingDeepLink.current = matchingDeepLinkedApp.id;
+    }
+
     if (hasInitialized.current) return;
     if (!sessionId && !publicAppBypass) return;
     if (viewingLanding) return;
     // Public research surveys open without a role or session.
     const requestedPublicSurvey = (() => {
-      const hash = window.location.hash.slice(1).toLowerCase();
       const urlAppParam = new URLSearchParams(window.location.search).get('app') || (window as any).__DEEP_LINK_APP_ID__ || initialAppId;
       const deepLinkId = hash || urlAppParam?.toLowerCase() || '';
       return PUBLIC_SURVEY_APP_IDS.has(deepLinkId);
@@ -525,7 +546,6 @@ export default function SpaceDesktop({
 
     hasInitialized.current = true;
 
-    const hash = window.location.hash.slice(1).toLowerCase();
     const urlAppParam = new URLSearchParams(window.location.search).get('app') || (window as any).__DEEP_LINK_APP_ID__ || initialAppId;
 
     const deepLinkId = hash || urlAppParam?.toLowerCase() || '';
@@ -596,7 +616,12 @@ export default function SpaceDesktop({
     if (!sessionId || !userRole || hasNormalizedPostAuthHistory.current) return;
     if (mode !== 'customer') return;
 
-    const appId = visibleApps[0]?.id;
+    const pendingAppId = pendingDeepLink.current;
+    const pendingApp = pendingAppId
+      ? config.apps.find((app) => app.id === pendingAppId)
+      : undefined;
+    const canOpenPendingApp = !!pendingApp && isAppAllowed(pendingApp.id);
+    const appId = canOpenPendingApp ? pendingApp.id : visibleApps[0]?.id;
     if (!appId) return;
 
     hasNormalizedPostAuthHistory.current = true;
@@ -607,6 +632,12 @@ export default function SpaceDesktop({
     window.history.replaceState({ view: 'landing', v: DESKTOP_VERSION }, '', landingUrl);
     isInternalHashChange.current = true;
     window.history.pushState({ view: 'app', appId, v: DESKTOP_VERSION }, '', appUrl);
+    if (canOpenPendingApp && pendingApp) {
+      setViewingLanding(false);
+      setActiveWindowId(pendingApp.id);
+      setIsAgentMinimized(true);
+    }
+    pendingDeepLink.current = null;
     setTimeout(() => { isInternalHashChange.current = false; }, 0);
   }, [sessionId, userRole, mode, visibleApps]);
 
@@ -776,11 +807,11 @@ export default function SpaceDesktop({
 
   const isUniversityImmersive =
     activeWindowId === 'prospect-radar' &&
-    (mode === 'entrepreneur' || (mode === 'customer' && userRole === 'university')) &&
+    (mode === 'entrepreneur' || (mode === 'customer' && (userRole === 'university' || userRole === 'company'))) &&
     !!CurrentApp &&
     !!currentAppConfig;
 
-  const agentDisplayName = userRole === 'university' ? 'Alma' : 'Scout';
+  const agentDisplayName = userRole === 'university' || userRole === 'company' ? 'Alma' : 'Scout';
 
   const isPublicSurveyImmersive =
     !!activeWindowId &&
@@ -802,6 +833,23 @@ export default function SpaceDesktop({
       runtimeTheme.themeTokens.shell?.pageBackground ||
       `linear-gradient(135deg, var(--space-surface-gradient-from), var(--space-surface-gradient-via), var(--space-surface-gradient-to))`,
   } as React.CSSProperties;
+
+  const brandFontName =
+    runtimeTheme.themeTokens.typography?.bodyFont ||
+    runtimeTheme.themeTokens.typography?.headingFont ||
+    'Sora';
+  const brandFontFamily =
+    runtimeTheme.themeTokens.typography?.fontFamily || buildFontFamily(brandFontName);
+
+  useLayoutEffect(() => {
+    // The generated document preloads Google Fonts with display=optional. On a
+    // cold production visit that is allowed to keep the system fallback for the
+    // whole page. Promote the same built font request to display=swap and bind
+    // it at document level so the gate, shell, Scout, and form controls all use
+    // the configured family after one normal build (no Tailwind runtime CDN).
+    document.documentElement.style.setProperty('--space-font-family', brandFontFamily);
+    document.body.style.fontFamily = brandFontFamily;
+  }, [brandFontFamily]);
 
   // Show brief loading indicator while post-checkout auto-session is being established
   if (isBootstrappingSession) {
@@ -860,15 +908,6 @@ export default function SpaceDesktop({
   if (isPublicSurveyImmersive && CurrentApp && currentAppConfig) {
     return (
       <>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        {runtimeTheme.themeTokens.typography?.headingFont && runtimeTheme.themeTokens.typography.headingFont !== 'Sora' && (
-          <link
-            href={`https://fonts.googleapis.com/css2?family=${encodeURIComponent(runtimeTheme.themeTokens.typography.headingFont)}:wght@300;400;500;600;700;800&display=swap`}
-            rel="stylesheet"
-          />
-        )}
-        <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
         <div className="h-screen w-full flex flex-col" style={rootStyle}>
           <div className="flex-1 min-h-0 flex flex-col">
             <AppErrorBoundary key={currentAppConfig.id} appName={currentAppConfig.name}>
@@ -878,6 +917,7 @@ export default function SpaceDesktop({
             </AppErrorBoundary>
           </div>
         </div>
+        <SupportWidget appId={currentAppConfig.id} appName={currentAppConfig.name} />
       </>
     );
   }
@@ -886,15 +926,6 @@ export default function SpaceDesktop({
   if (isStudentImmersive && CurrentApp && currentAppConfig) {
     return (
       <>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        {runtimeTheme.themeTokens.typography?.headingFont && runtimeTheme.themeTokens.typography.headingFont !== 'Sora' && (
-          <link
-            href={`https://fonts.googleapis.com/css2?family=${encodeURIComponent(runtimeTheme.themeTokens.typography.headingFont)}:wght@300;400;500;600;700;800&display=swap`}
-            rel="stylesheet"
-          />
-        )}
-        <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
         <div className="h-screen w-full flex flex-col" style={rootStyle}>
           <div className="flex-1 min-h-0 flex flex-col">
             <AppErrorBoundary key={currentAppConfig.id} appName={currentAppConfig.name}>
@@ -904,6 +935,7 @@ export default function SpaceDesktop({
             </AppErrorBoundary>
           </div>
         </div>
+        <SupportWidget appId={currentAppConfig.id} appName={currentAppConfig.name} />
       </>
     );
   }
@@ -912,15 +944,6 @@ export default function SpaceDesktop({
   if (isUniversityImmersive && CurrentApp && currentAppConfig) {
     return (
       <>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        {runtimeTheme.themeTokens.typography?.headingFont && runtimeTheme.themeTokens.typography.headingFont !== 'Sora' && (
-          <link
-            href={`https://fonts.googleapis.com/css2?family=${encodeURIComponent(runtimeTheme.themeTokens.typography.headingFont)}:wght@300;400;500;600;700;800&display=swap`}
-            rel="stylesheet"
-          />
-        )}
-        <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
         <div className="h-screen w-full flex flex-col" style={rootStyle}>
           <div className="flex-1 min-h-0 flex flex-col">
             <AppErrorBoundary key={currentAppConfig.id} appName={currentAppConfig.name}>
@@ -930,6 +953,7 @@ export default function SpaceDesktop({
             </AppErrorBoundary>
           </div>
         </div>
+        <SupportWidget appId={currentAppConfig.id} appName={currentAppConfig.name} />
       </>
     );
   }
@@ -947,16 +971,7 @@ export default function SpaceDesktop({
 
   return (
     <>
-      {/* Google Fonts - Load brand font or fallback to Sora */}
-      <link rel="preconnect" href="https://fonts.googleapis.com" />
-      <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-      {runtimeTheme.themeTokens.typography?.headingFont && runtimeTheme.themeTokens.typography.headingFont !== 'Sora' && (
-        <link 
-          href={`https://fonts.googleapis.com/css2?family=${encodeURIComponent(runtimeTheme.themeTokens.typography.headingFont)}:wght@300;400;500;600;700;800&display=swap`} 
-          rel="stylesheet" 
-        />
-      )}
-      <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+      {/* Brand fonts are loaded once by the platform-generated document head. */}
 
       <div 
         className="min-h-screen"
@@ -1425,6 +1440,9 @@ export default function SpaceDesktop({
         </div>
       </div>
       </div>
+      {currentAppConfig && CurrentApp && (
+        <SupportWidget appId={currentAppConfig.id} appName={currentAppConfig.name} />
+      )}
     </>
   );
 }
