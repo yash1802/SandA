@@ -1815,13 +1815,13 @@ interface SearchCriteria {
   count?: number;
 }
 
-type ProgramHit = { title?: string; link?: string; snippet?: string };
+type ProgramHit = { title?: string; link?: string; snippet?: string; displayedLink?: string };
 
 function normalizeSearchLevel(raw: string): 'graduate' | 'undergraduate' | '' {
   const sniffed = sniffProgramLevel(raw);
   if (sniffed) return sniffed;
   const t = raw.toLowerCase();
-  if (/(postgraduate|post-grad|masters?|mba|msc|m\.sc|phd|doctorate)/.test(t)) return 'graduate';
+  if (/(postgraduate|post-grad|masters?|mba|msc|m\.sc|mres|meng|llm|phd|doctorate)/.test(t)) return 'graduate';
   if (/(bachelors?|undergraduate|under-grad)/.test(t)) return 'undergraduate';
   return '';
 }
@@ -1836,29 +1836,94 @@ function resolveSearchLevel(criteria: SearchCriteria, deps: AgentDeps): 'graduat
   return profileLevel;
 }
 
-function levelQuery(level: string): string {
-  if (level === 'graduate') return 'masters MSc MBA graduate postgraduate';
+function levelQuery(level: string, targetProgrammeType: string): string {
   if (level === 'undergraduate') return 'bachelor undergraduate';
-  return '';
+  if (/\bmba\b/i.test(targetProgrammeType)) return 'masters MBA postgraduate';
+  // A missing or non-MBA graduate level defaults to a broad master's search.
+  return 'masters MSc postgraduate';
 }
 
-const ACADEMIC_TLD_BY_COUNTRY: Record<string, string> = {
-  'united kingdom': 'site:ac.uk',
-  'united states': 'site:edu',
-  australia: 'site:edu.au',
-  'new zealand': 'site:ac.nz',
-  'south africa': 'site:ac.za',
-  india: 'site:ac.in',
-  japan: 'site:ac.jp',
+const UNIVERSITIES_BY_COUNTRY: Record<string, string[]> = {
+  'united kingdom': [
+    'University of Edinburgh',
+    'University of Manchester',
+    'Imperial College London',
+    'UCL',
+    'University of Bristol',
+    'University of Warwick',
+    'University of Glasgow',
+  ],
+  canada: [
+    'University of Toronto',
+    'University of British Columbia',
+    'McGill University',
+    'University of Waterloo',
+    'University of Alberta',
+  ],
+  france: ['École Polytechnique', 'Université Paris-Saclay', 'Sorbonne Université', 'Sciences Po', 'INSEAD'],
+  singapore: ['National University of Singapore', 'Nanyang Technological University', 'Singapore Management University'],
+  germany: ['TU Munich', 'LMU Munich', 'Heidelberg University', 'Humboldt University', 'RWTH Aachen'],
+  netherlands: ['Delft University of Technology', 'University of Amsterdam', 'Leiden University', 'Eindhoven University of Technology'],
+  australia: ['University of Melbourne', 'University of Sydney', 'ANU', 'University of Queensland', 'Monash University'],
+  'united states': ['MIT', 'Stanford', 'Carnegie Mellon', 'UC Berkeley', 'University of Michigan'],
+  india: ['IIT Bombay', 'IIT Delhi', 'Indian Institute of Science', 'IIT Madras', 'IIT Kanpur'],
+  ireland: ['Trinity College Dublin', 'University College Dublin', 'University of Galway'],
+  italy: ['University of Bologna', 'Sapienza University of Rome', 'Politecnico di Milano'],
+  japan: ['University of Tokyo', 'Kyoto University', 'Osaka University'],
+  china: ['Tsinghua University', 'Peking University', 'Fudan University'],
+  'hong kong': ['University of Hong Kong', 'Chinese University of Hong Kong', 'Hong Kong University of Science and Technology'],
+  switzerland: ['ETH Zurich', 'EPFL', 'University of Zurich'],
+  sweden: ['KTH Royal Institute of Technology', 'Lund University', 'Uppsala University'],
+  denmark: ['University of Copenhagen', 'Technical University of Denmark', 'Aarhus University'],
+  norway: ['University of Oslo', 'Norwegian University of Science and Technology', 'University of Bergen'],
+  finland: ['University of Helsinki', 'Aalto University', 'University of Turku'],
+  spain: ['University of Barcelona', 'Autonomous University of Barcelona', 'Complutense University of Madrid'],
+  portugal: ['University of Lisbon', 'University of Porto', 'NOVA University Lisbon'],
+  'new zealand': ['University of Auckland', 'University of Otago', 'Victoria University of Wellington'],
+  'south africa': ['University of Cape Town', 'University of the Witwatersrand', 'Stellenbosch University'],
+  'south korea': ['Seoul National University', 'KAIST', 'Yonsei University'],
+  'united arab emirates': ['United Arab Emirates University', 'Khalifa University', 'American University of Sharjah'],
 };
+
+function fallbackUniversities(country: string): string[] {
+  const label = displayCountry(country);
+  return [`University of ${label}`, `${label} National University`, `${label} Institute of Technology`];
+}
+
+async function universitiesForCountry(country: string): Promise<string[]> {
+  const mapped = UNIVERSITIES_BY_COUNTRY[country];
+  if (mapped?.length) return mapped.slice(0, 5);
+  try {
+    const res = await llmChat(
+      [
+        {
+          role: 'system',
+          content: 'Name established universities in one country from common knowledge. Return ONLY valid JSON and never include a university outside that country.',
+        },
+        {
+          role: 'user',
+          content: `Country: ${displayCountry(country)}\nReturn ONLY {"universities":["University name","University name","University name"]} with three well-known universities in that country.`,
+        },
+      ],
+      { temperature: 0, maxTokens: 180 }
+    );
+    const parsed = extractJson(res.content);
+    const names = asArr<any>(parsed?.universities).map((name) => s(name, 120)).filter(Boolean).slice(0, 3);
+    if (names.length >= 2) return names;
+  } catch {
+    // Keep search usable if the name-generation request is unavailable.
+  }
+  return fallbackUniversities(country);
+}
 
 async function buildSearchQueries(
   focus: string,
   level: string,
+  targetProgrammeType: string,
   locations: string,
   university: string,
   targetCountries: string[],
-  targetCities: string[],
+  _targetCities: string[],
   year: number
 ): Promise<string[]> {
   const queries: string[] = [];
@@ -1866,38 +1931,19 @@ async function buildSearchQueries(
     const compact = query.replace(/\s+/g, ' ').trim();
     if (compact && !queries.includes(compact)) queries.push(compact);
   };
-  const levelTerms = levelQuery(level);
-  const base = [university ? `"${university}"` : '', `"${focus}"`, levelTerms].filter(Boolean).join(' ');
-  const focusAndLevel = [`"${focus}"`, levelTerms].filter(Boolean).join(' ');
-  const cityScope = targetCities.slice(0, 4).map((city) => `"${city}"`).join(' OR ');
-  const locationTargets = targetCountries.length ? targetCountries : [locations];
-  let officialUniversityDomain: string | null | undefined;
+  const levelTerms = levelQuery(level, targetProgrammeType);
+  const countryTargets = targetCountries.length ? targetCountries : [canonicalCountry(locations) || normText(locations)];
 
-  for (const location of locationTargets) {
-    const academicTld = ACADEMIC_TLD_BY_COUNTRY[location];
-    if (academicTld) {
-      addQuery(`${base} ${cityScope} ${academicTld}`);
-      continue;
+  if (university) {
+    addQuery(`"${university}" "${focus}" ${levelTerms} programme entry requirements ${year}`);
+    return queries;
+  }
+
+  for (const country of countryTargets) {
+    const universities = await universitiesForCountry(country);
+    for (const universityName of universities) {
+      addQuery(`"${universityName}" "${focus}" ${levelTerms} programme entry requirements ${year}`);
     }
-
-    if (university) {
-      if (officialUniversityDomain === undefined) {
-        try {
-          const officialSiteHits = await webSearch(`"${university}" official website`, 5);
-          officialUniversityDomain = hostOf(s(officialSiteHits[0]?.link, 300)) || null;
-        } catch (error) {
-          rethrowAgentApiError(error);
-          officialUniversityDomain = null;
-        }
-      }
-      if (officialUniversityDomain) {
-        addQuery(`${focusAndLevel} site:${officialUniversityDomain}`);
-        continue;
-      }
-    }
-
-    const locationLabel = targetCountries.length ? displayCountry(location) : location;
-    addQuery(`${base} ${locationLabel} ${year} official admission faculty department`);
   }
 
   return queries;
@@ -1973,7 +2019,87 @@ function programOverviewUrl(url: string): string {
 
 function isAggregatorUrl(url: string): boolean {
   const host = hostOf(url);
-  return /(mastersportal|bachelorsportal|studyportals|educations\.com|topuniversities|usnews|niche|collegefactual|petersons|hotcourses|findamasters|masterstudies|bachelorstudies)/i.test(host);
+  return /(applyboard|idp\.com|timescoursefinder|free-apply|mastersportal|bachelorsportal|studyportals|educations\.com|topuniversities|usnews|niche|collegefactual|petersons|hotcourses|findamasters|masterstudies|bachelorstudies|globalreach\.in|ciceducationhub)/i.test(host);
+}
+
+const KNOWN_OFFICIAL_ACADEMIC_HOSTS = new Set([
+  'utoronto.ca', 'ubc.ca', 'mcgill.ca', 'uwaterloo.ca', 'ualberta.ca',
+  'polytechnique.edu', 'universite-paris-saclay.fr', 'sorbonne-universite.fr', 'sciencespo.fr',
+  'tum.de', 'lmu.de', 'uni-heidelberg.de', 'hu-berlin.de', 'rwth-aachen.de',
+  'tudelft.nl', 'uva.nl', 'leidenuniv.nl', 'tue.nl',
+]);
+
+function isOfficialAcademicResultUrl(url: string): boolean {
+  const host = hostOf(url);
+  if (!host || isAggregatorUrl(url) || isBannedHost(url)) return false;
+  if (/(?:\.ac\.uk|\.edu|\.ac\.sg|\.edu\.au|\.ac\.nz|\.edu\.sg|\.ac\.in|\.edu\.hk)$/i.test(host)) return true;
+  if (/(?:^|\.)university\.ca$/i.test(host) || /(?:^|\.)(?:uni|tu)-[a-z0-9-]+\.de$/i.test(host)) return true;
+  return [...KNOWN_OFFICIAL_ACADEMIC_HOSTS].some((known) => host === known || host.endsWith(`.${known}`));
+}
+
+async function fetch_programme_page(url: string): Promise<ProgramHit | null> {
+  if (!isOfficialAcademicResultUrl(url)) return null;
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 30_000);
+  try {
+    const res = await fetch('/api/hooks/execute/bce7db44-7049-40fa-80a1-1dacb4302c83/brightdata-unlocker', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-App-Id': window.__APP_ID__ || '' },
+      signal: controller.signal,
+      body: JSON.stringify({ url }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) return null;
+    const payload = data?.result || data?.body || data;
+    const content = s(payload?.content || payload?.data?.content, 12000);
+    if (!content) return null;
+    return { title: 'Official programme page', link: s(payload?.url, 300) || url, snippet: content };
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+const PROGRAMME_FETCH_BLOCKED_HOSTS = [
+  'reddit.com', 'facebook.com', 'instagram.com', 'quora.com', 'youtube.com', 'wikipedia.org',
+  'thestudentroom.co.uk', 'hotcoursesabroad.com', 'shiksha.com', 'findamasters.com',
+  'mastersportal.eu', 'ucas.com', 'postgrad.com', 'uni4edu.com', 'theuniguide.co.uk',
+  'studyabroad', 'leverageedu.com', 'briggategroup.com', 'gostudyin.com', 'nbyula.com',
+  'thecompleteuniversityguide.co.uk', 'studywhere.ai', 'upgrad.com', 'gcq360.com',
+  'visioninternationaledu.com', 'falconnovaconsultants.com', 'gabble.ai', 'scribd.com',
+  'nomadcredit.com', 'academia.stackexchange.com',
+];
+
+const UNIVERSITY_QUERY_STOPWORDS = new Set([
+  'of', 'the', 'university', 'college', 'école', 'ecole', 'national', 'institute',
+]);
+
+async function searchWithProgrammePageFetch(query: string, limit: number): Promise<ProgramHit[]> {
+  const results: ProgramHit[] = await webSearch(query, limit);
+  const universityName = query.match(/"([^"]+)"/)?.[1] || '';
+  const universityKeywords = universityName
+    .toLowerCase()
+    .split(/\s+/)
+    .map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
+    .filter((word) => word && !UNIVERSITY_QUERY_STOPWORDS.has(word));
+
+  // Fetch the first official academic result that is visibly relevant to the
+  // university in this query, without spending calls on aggregators or forums.
+  const official = results.find((hit) => {
+    const link = s(hit.link, 300);
+    const host = hostOf(link);
+    if (!host || PROGRAMME_FETCH_BLOCKED_HOSTS.some((blocked) =>
+      blocked === 'studyabroad'
+        ? host.includes(blocked)
+        : host === blocked || host.endsWith(`.${blocked}`)
+    )) return false;
+    const linkText = `${host} ${s(hit.title, 300)} ${s(hit.displayedLink, 300)} ${link}`.toLowerCase();
+    return universityKeywords.some((keyword) => linkText.includes(keyword)) && isOfficialAcademicResultUrl(link);
+  });
+  if (!official?.link) return results;
+  const page = await fetch_programme_page(official.link);
+  return page ? [page, ...results] : results;
 }
 
 function isCatalogUrl(hit: ProgramHit): boolean {
@@ -2083,29 +2209,11 @@ function ownSiteEvidence(p: PendingProgram, pool: ProgramHit[]): string {
   return ownSiteHits(p, pool).map(hitText).join(' ').toLowerCase();
 }
 
-// Targeted site-scoped searches give the enrichment LLM official evidence for
-// both factual fields and genuinely program-specific fit reasons.
+// Programme pages are fetched through the registered anti-bot-safe server
+// function, and only after the academic-domain guard has accepted the URL.
 async function fetchOfficialPageEvidence(url: string): Promise<ProgramHit[]> {
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
-  try {
-    const res = await fetch(url, { signal: controller.signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
-    if (!res.ok) return [];
-    const contentType = res.headers.get('content-type') || '';
-    if (!/text\/html|application\/xhtml\+xml/i.test(contentType)) return [];
-    const html = await res.text();
-    const doc = new DOMParser().parseFromString(html, 'text/html');
-    doc.querySelectorAll('script,style,noscript,svg').forEach((node) => node.remove());
-    const text = (doc.body?.textContent || '').replace(/\s+/g, ' ').trim();
-    if (!text) return [];
-    return [{ title: doc.title || 'Official program page', link: res.url || url, snippet: text.slice(0, 12000) }];
-  } catch {
-    // Many university sites disallow browser CORS. Site-scoped search below
-    // remains the official-source fallback when the direct page cannot open.
-    return [];
-  } finally {
-    window.clearTimeout(timeoutId);
-  }
+  const hit = await fetch_programme_page(url);
+  return hit ? [hit] : [];
 }
 
 async function expandProgramEvidence(pending: PendingProgram[], unlimited = false): Promise<void> {
@@ -2118,13 +2226,13 @@ async function expandProgramEvidence(pending: PendingProgram[], unlimited = fals
       if (!initialHost) return;
       const tokens = meaningfulProgramTokens(p.program_name).slice(0, 5).join(' ');
       const search = (query: string, limit: number) =>
-        webSearch(query, limit).catch((error) => {
+        searchWithProgrammePageFetch(query, limit).catch((error) => {
           rethrowAgentApiError(error);
           return [] as ProgramHit[];
         });
 
-      // Step 1: identify the official overview page with an exact site query.
-      const overviewHits = await search(`site:${initialHost} "${p.program_name}" official program overview`, 6);
+      // Step 1: identify the official overview page with a named-university query.
+      const overviewHits = await search(`"${p.university}" "${p.program_name}" official programme overview`, 6);
       const overview = overviewHits.find((hit) =>
         isLikelyProgramPageHit(hit, { program_name: p.program_name }, p.degree_type.toLowerCase().includes('bachelor') ? 'undergraduate' : 'graduate')
       );
@@ -2138,12 +2246,13 @@ async function expandProgramEvidence(pending: PendingProgram[], unlimited = fals
       // Step 2: open the selected page, then collect exact-host evidence.
       const host = hostOf(p.website);
       if (!host) return;
+      const universityName = `"${p.university}"`;
       const [page, fees, deadlines, academics, differentiators] = await Promise.all([
         fetchOfficialPageEvidence(p.website),
-        search(`site:${host} ${tokens} tuition fees cost`, 4),
-        search(`site:${host} ${tokens} application deadline admissions "${year}" OR "${nextYear}"`, 5),
-        search(`site:${host} ${tokens} faculty research curriculum modules cohort "class size"`, 5),
-        search(`site:${host} ${tokens} "placement year" internship "exchange partner" "study abroad" "alumni network" careers`, 5),
+        search(`${universityName} ${tokens} tuition fees cost`, 4),
+        search(`${universityName} ${tokens} application deadline admissions "${year}" OR "${nextYear}"`, 5),
+        search(`${universityName} ${tokens} faculty research curriculum modules cohort "class size"`, 5),
+        search(`${universityName} ${tokens} "placement year" internship "exchange partner" "study abroad" "alumni network" careers`, 5),
       ]);
       p.extra = [...page, ...overviewHits, ...fees, ...deadlines, ...academics, ...differentiators].filter(
         (h) => h.link && sameSite(p.website, h.link)
@@ -2336,9 +2445,11 @@ export async function discoverPrograms(
   const targetCountries = prefCountries(locations);
   const targetCities = prefCities(locations);
   const budgetMax = parseBudgetMaxUsd(budgetPref);
+  const targetProgrammeType = [s(criteria.level, 80), s(answers.level, 160)].filter(Boolean).join(' ');
   const queries = await buildSearchQueries(
     majors,
     level,
+    targetProgrammeType,
     locations,
     university,
     targetCountries,
@@ -2348,7 +2459,7 @@ export async function discoverPrograms(
 
   const hits: ProgramHit[] = [];
   for (const q of queries) {
-    const results = await webSearch(q, 10);
+    const results = await searchWithProgrammePageFetch(q, 10);
     for (const r of results) {
       const key = normalizedUrl(s(r.link, 300));
       if (key && !hits.some((h) => normalizedUrl(s(h.link, 300)) === key)) hits.push(r);
@@ -2629,10 +2740,9 @@ function bulletSupported(text: string, evidenceBlob: string): boolean {
 
 export async function researchProgramDetails(program: ProgramRow): Promise<ProgramDetails | null> {
   const uni = s(program.university, 140);
-  const host = hostOf(program.website || '');
   const tokens = meaningfulProgramTokens(s(program.program_name, 180)).slice(0, 5).join(' ');
   const year = new Date().getFullYear();
-  const scope = host ? `site:${host}` : `"${uni}"`;
+  const scope = `"${uni}"`;
   const queries = [
     `${scope} ${tokens} program overview curriculum courses structure`,
     `${scope} ${tokens} admission entry requirements`,
@@ -2660,7 +2770,7 @@ export async function researchProgramDetails(program: ProgramRow): Promise<Progr
     keepHit({ title: `${uni} — ${s(program.program_name, 180)}`, link: program.website, snippet: s(program.summary, 300) });
   }
   for (const q of queries) {
-    const results = await webSearch(q, 6);
+    const results = await searchWithProgrammePageFetch(q, 6);
     for (const r of results) keepHit(r);
   }
   if (hits.length < 2) return null;
