@@ -1,5 +1,5 @@
 <!-- __compiler_v:5 -->
-<!-- AUDOS_PUBLISH_TOKEN:b62971a4-2695-4323-88bf-a8f564fd3ef1 -->
+<!-- AUDOS_PUBLISH_TOKEN:acd4822f-e3a3-49eb-897f-60f438bea6d9 -->
 <!DOCTYPE html>
 <html lang="en" class="light" style="background-color:#f5fafb;color-scheme:light">
   <head>
@@ -7,7 +7,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#e32626" />
     <meta name="color-scheme" content="light" />
-    <link rel="icon" href="https://storage.googleapis.com/audos-images/chat-attachments/8e8874c3-8ca0-4043-ad99-87e4dd177c41.png" />
+    <link rel="icon" href="/favicon.svg" />
     <title>Scout &amp; Alma</title>
 <meta name="description" content="Talk to Scout. Recruit with Alma. Match for life." />
 <meta property="og:type" content="website" />
@@ -5752,6 +5752,8 @@ INVITATIONS FROM UNIVERSITIES (shown in the student's "Invitations" tab \u2014 r
 ${Gb(e.invitations)}
 
 DOCUMENTS: ${s.length?s.map(l=>`${l.name} (${l.kind})`).join(", "):"(none)"}
+
+When fetching university or programme pages to read details such as fees, deadlines, and entry requirements, always use the \`fetch_programme_page\` tool instead of \`web_fetch\`. It bypasses anti-bot protections that block standard HTTP requests on university websites.
 `}function Vb(e){let t=/(?:^|[,{]\s*)"reply"\s*:\s*"/.exec(e);if(!t)return"";let a=t.index+t[0].length,r="";for(;a<e.length;){let n=e[a];if(n==="\\"){if(a++,a>=e.length)break;let s=e[a];if(s==="n")r+=`
 `;else if(s==="r")r+="\r";else if(s==="t")r+="	";else if(s==="b")r+="\b";else if(s==="f")r+="\f";else if(s==="u"){let o=e.slice(a+1,a+5);if(!/^[0-9a-f]{4}$/i.test(o))break;r+=String.fromCharCode(parseInt(o,16)),a+=4}else r+=s;a++;continue}if(n==='"')break;r+=n,a++}return r}function lu(e){return za(e).map(t=>({title:Y(t?.title,80)||"Why it fits",detail:Y(t?.detail,400)})).filter(t=>t.detail).slice(0,5)}function cu(e,t){let a={...t};return!e||typeof e!="object"||(typeof e.name=="string"&&(a.name=Y(e.name,80)),typeof e.headline=="string"&&(a.headline=Y(e.headline,160)),typeof e.location=="string"&&(a.location=Y(e.location,120)),typeof e.visible=="boolean"&&(a.visible=e.visible),typeof e.lookingFor=="string"&&(a.lookingFor=Y(e.lookingFor,1200)),Array.isArray(e.education)&&(a.education=e.education.slice(0,12).map(r=>typeof r=="string"?{institute:"",degree:Y(r,140),field:"",grade:"",startYear:"",endYear:"",inProgress:!1,aiSummary:""}:{institute:Y(r?.institute,140),degree:Y(r?.degree,100),field:Y(r?.field,120),grade:Y(r?.grade,60),startYear:Y(r?.startYear,20),endYear:Y(r?.endYear,20),inProgress:!!r?.inProgress,aiSummary:Y(r?.aiSummary,400)}).filter(r=>r.institute||r.degree||r.field)),Array.isArray(e.work)&&(a.work=e.work.slice(0,15).map(r=>({company:Y(r?.company,140),title:Y(r?.title,140),startDate:Y(r?.startDate,40),endDate:Y(r?.endDate,40),current:!!r?.current,description:Y(r?.description,2e3),aiSummary:Y(r?.aiSummary,400)})).filter(r=>r.company||r.title||r.description)),Array.isArray(e.research)&&(a.research=e.research.slice(0,12).map(r=>({title:Y(r?.title,200),venue:Y(r?.venue,140),date:Y(r?.date,40),url:Y(r?.url,300),aiSummary:Y(r?.aiSummary,400)})).filter(r=>r.title||r.venue)),Array.isArray(e.skills)&&(a.skills=e.skills.map(r=>Y(r,60)).filter(Boolean).slice(0,40)),typeof e.skillsSummary=="string"&&(a.skillsSummary=Y(e.skillsSummary,400)),Array.isArray(e.extracurriculars)&&(a.extracurriculars=e.extracurriculars.slice(0,12).map(r=>({title:Y(r?.title,140),description:Y(r?.description,800),aiSummary:Y(r?.aiSummary,400)})).filter(r=>r.title||r.description)),Array.isArray(e.misc)&&(a.misc=e.misc.slice(0,12).map(r=>({title:Y(r?.title,140),detail:Y(r?.detail,800)})).filter(r=>r.title||r.detail))),a}function du(e){return e.split(/,|;| and /i).map(t=>t.trim()).filter(t=>t.length>1&&t.length<80)}function Kr(e){return e.replace(/\b[a-z]/g,t=>t.toUpperCase())}function fl(e){let t=[...qo(e).map(Uo),...Yo(e).map(Kr)],a=t.length?t:du(e).map(Kr);return[...new Set(a.filter(Boolean))]}function gl(e,t){return JSON.stringify(e.factors)!==JSON.stringify(t.factors)}async function Qb(e,t){let a=t.map(i=>`- factor "${i.factor}" (${i.hint}) \u2190 student's answer: "${Y(e[i.answer],400)}"`).join(`
 `),r=await Ia([{role:"system",content:"You maintain the fit buckets of a student's university Search Brief. You convert raw conversational answers into SHORT keyword chips. Return ONLY valid JSON. Never invent preferences the student did not state."},{role:"user",content:`Convert each answer below into keyword chips for its factor.

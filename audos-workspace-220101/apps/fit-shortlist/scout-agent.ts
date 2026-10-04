@@ -215,6 +215,8 @@ INVITATIONS FROM UNIVERSITIES (shown in the student's "Invitations" tab — read
 ${describeInvitations(deps.invitations)}
 
 DOCUMENTS: ${documents.length ? documents.map((d) => `${d.name} (${d.kind})`).join(', ') : '(none)'}
+
+When fetching university or programme pages to read details such as fees, deadlines, and entry requirements, always use the \`fetch_programme_page\` tool instead of \`web_fetch\`. It bypasses anti-bot protections that block standard HTTP requests on university websites.
 `;
 }
 
