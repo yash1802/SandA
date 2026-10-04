@@ -193,7 +193,7 @@ CRITICAL RULES:
 - If CURRENT PROFILE shows a completed or in-progress master's, MBA, MPhil, doctorate, or other postgraduate education, treat the student as looking for graduate/postgraduate opportunities unless they explicitly ask for a bachelor's/undergraduate search.
 - Answer questions about their current recommendations, shortlist, profile, brief, or documents directly from the state below — no action needed for reading.
 - SEARCH PROGRESS belongs only in the app's status indicator. Never write "Search running:" or any other in-progress status line in the student-facing reply.
-- SEARCH METHOD: first identify a program's official overview URL with a targeted academic-domain query, then open that page and search that exact official host for details. Prefer official university pages over aggregators. If official results are unavailable, still recommend relevant programs from general knowledge and clearly say: "Based on what I know — verify specific details on the official site." Never refuse to recommend solely because search evidence is incomplete.
+- SEARCH METHOD: first identify a program's official overview URL with a targeted academic-domain query, then open that page and search that exact official host for details. Prefer official university pages over aggregators. If official results are unavailable, still recommend relevant programs from general knowledge and clearly say: "Based on what I know — verify specific details on the official site." Never refuse to recommend solely because search evidence is incomplete. Aggregator results (e.g. MastersPortal, UCAS, Prospects.ac.uk) are not official sources — do not use their text content as programme data. However, they often link to official programme pages. Before falling back to general knowledge, extract any identifiable official university URL from aggregator listings and call \`fetch_programme_page\` on it. Only fall back to general knowledge if no official URL can be identified after attempting this extraction.
 - DATE FRESHNESS: today is the date stated at the top of this prompt. Prefer 2026 or clearly labeled 2026–27 sources. If a deadline or application cycle has passed, say: "Note: this deadline may be for a past cycle — check the official site for 2027 intake dates." Never present an October 2025 or Fall 2026 application notice as currently open.
 - NUMERICAL FACTS: only state cohort size, class size, tuition, test averages, acceptance rates, rankings, or other figures when that exact number appears in official search evidence supplied this turn or in the stored program record. If it is not confirmed, say it is not listed on the official page. Never infer, extrapolate, or guess a statistic.
 - ACTION CONFIRMATION: when you emit a shortlist action, do not claim it is complete in the drafted reply. The system executes it after generation and replaces the reply with a confirmation only after the database call succeeds.
@@ -1842,6 +1842,67 @@ function levelQuery(level: string): string {
   return '';
 }
 
+const ACADEMIC_TLD_BY_COUNTRY: Record<string, string> = {
+  'united kingdom': 'site:ac.uk',
+  'united states': 'site:edu',
+  australia: 'site:edu.au',
+  'new zealand': 'site:ac.nz',
+  'south africa': 'site:ac.za',
+  india: 'site:ac.in',
+  japan: 'site:ac.jp',
+};
+
+async function buildSearchQueries(
+  focus: string,
+  level: string,
+  locations: string,
+  university: string,
+  targetCountries: string[],
+  targetCities: string[],
+  year: number
+): Promise<string[]> {
+  const queries: string[] = [];
+  const addQuery = (query: string) => {
+    const compact = query.replace(/\s+/g, ' ').trim();
+    if (compact && !queries.includes(compact)) queries.push(compact);
+  };
+  const levelTerms = levelQuery(level);
+  const base = [university ? `"${university}"` : '', `"${focus}"`, levelTerms].filter(Boolean).join(' ');
+  const focusAndLevel = [`"${focus}"`, levelTerms].filter(Boolean).join(' ');
+  const cityScope = targetCities.slice(0, 4).map((city) => `"${city}"`).join(' OR ');
+  const locationTargets = targetCountries.length ? targetCountries : [locations];
+  let officialUniversityDomain: string | null | undefined;
+
+  for (const location of locationTargets) {
+    const academicTld = ACADEMIC_TLD_BY_COUNTRY[location];
+    if (academicTld) {
+      addQuery(`${base} ${cityScope} ${academicTld}`);
+      continue;
+    }
+
+    if (university) {
+      if (officialUniversityDomain === undefined) {
+        try {
+          const officialSiteHits = await webSearch(`"${university}" official website`, 5);
+          officialUniversityDomain = hostOf(s(officialSiteHits[0]?.link, 300)) || null;
+        } catch (error) {
+          rethrowAgentApiError(error);
+          officialUniversityDomain = null;
+        }
+      }
+      if (officialUniversityDomain) {
+        addQuery(`${focusAndLevel} site:${officialUniversityDomain}`);
+        continue;
+      }
+    }
+
+    const locationLabel = targetCountries.length ? displayCountry(location) : location;
+    addQuery(`${base} ${locationLabel} ${year} official admission faculty department`);
+  }
+
+  return queries;
+}
+
 function isGraduateText(text: string): boolean {
   return /\b(master|masters|msc|m\.sc|ms\b|m\.s\b|mba|ma\b|m\.a\b|mres|mphil|llm|phd|ph\.d|doctorate|doctoral|graduate|postgraduate|post-grad)\b/i.test(text);
 }
@@ -2275,20 +2336,15 @@ export async function discoverPrograms(
   const targetCountries = prefCountries(locations);
   const targetCities = prefCities(locations);
   const budgetMax = parseBudgetMaxUsd(budgetPref);
-  const levelTerms = levelQuery(level);
-  const cityText = targetCities.length ? targetCities.slice(0, 4).join(' OR ') : locations;
-
-  const queries = university
-    ? [
-        `site:.edu "${university}" "${majors}" ${levelTerms} official program`,
-        `"${university}" "${majors}" ${levelTerms} official university program overview`,
-      ]
-    : [
-        `site:.edu "${majors}" ${levelTerms} "${cityText}" official program`,
-        `site:.ac.uk "${majors}" ${levelTerms} "${cityText}" official program`,
-        `${majors} ${levelTerms} official university program "${locations}"`,
-        ...(targetCountries.includes('united states') ? [`site:.edu "${majors}" ${levelTerms} "${cityText}" tuition`] : []),
-      ];
+  const queries = await buildSearchQueries(
+    majors,
+    level,
+    locations,
+    university,
+    targetCountries,
+    targetCities,
+    today.getFullYear()
+  );
 
   const hits: ProgramHit[] = [];
   for (const q of queries) {
